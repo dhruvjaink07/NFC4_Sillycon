@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
+import mammoth from 'mammoth' // Add this import
 import { ThemeProvider } from "@/components/providers/theme-provider"
 import { motion, AnimatePresence } from "framer-motion"
 import { Shield, Upload, Settings, Zap, X, File, FileText, FileImage, Plus } from "lucide-react"
@@ -126,21 +127,245 @@ export default function DataPrivacyRedactionTool() {
     }
   }
 
+  // Update the readFileAsText function to extract HTML structure:
+  const readFileAsText = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const fileType = getFileExtension(file.name)
+      
+      // Handle .docx files with mammoth.js to preserve structure
+      if (fileType === 'docx') {
+        const reader = new FileReader()
+        
+        reader.onload = async (e) => {
+          try {
+            const arrayBuffer = e.target?.result as ArrayBuffer
+            console.log('Processing DOCX file:', file.name, 'Size:', arrayBuffer.byteLength, 'bytes')
+            
+            // Extract HTML to preserve structure (tables, headings, etc.)
+            const htmlResult = await mammoth.convertToHtml({ arrayBuffer }, {
+              styleMap: [
+                // Map Word styles to HTML/CSS
+                "p[style-name='Title'] => h1",
+                "p[style-name='Heading 1'] => h1",
+                "p[style-name='Heading 2'] => h2", 
+                "p[style-name='Heading 3'] => h3",
+                "p[style-name='Heading 4'] => h4",
+                "r[style-name='Strong'] => strong",
+                "r[style-name='Emphasis'] => em",
+                // Enhanced table mapping
+                "table => table.docx-table",
+                "tr => tr",
+                "td => td",
+                "th => th"
+              ],
+              includeDefaultStyleMap: true,
+              includeEmbeddedStyleMap: true,
+              convertImage: mammoth.images.imgElement(function(image) {
+                // Convert images to base64 or placeholder
+                return image.read("base64").then(function(imageBuffer) {
+                  return {
+                    src: "data:" + image.contentType + ";base64," + imageBuffer
+                  }
+                })
+              })
+            })
+            
+            console.log('Mammoth HTML extraction result:', {
+              hasValue: !!htmlResult.value,
+              valueLength: htmlResult.value?.length || 0,
+              valuePreview: htmlResult.value?.substring(0, 300),
+              messagesCount: htmlResult.messages?.length || 0
+            })
+            
+            if (htmlResult.value && htmlResult.value.trim()) {
+              console.log('Successfully extracted structured HTML from DOCX:', file.name)
+              
+              // Create a structured content object
+              const structuredContent = {
+                type: 'html',
+                content: htmlResult.value,
+                hasStructure: true
+              }
+              
+              console.log('Resolving with HTML content:', JSON.stringify(structuredContent).substring(0, 200))
+              resolve(JSON.stringify(structuredContent))
+            } else {
+              console.warn('HTML extraction returned empty result, trying raw text extraction')
+              
+              // Fallback to raw text if HTML extraction fails
+              const textResult = await mammoth.extractRawText({ arrayBuffer })
+              console.log('Raw text extraction result:', {
+                hasValue: !!textResult.value,
+                valueLength: textResult.value?.length || 0,
+                valuePreview: textResult.value?.substring(0, 300)
+              })
+              
+              if (textResult.value && textResult.value.trim()) {
+                const structuredContent = {
+                  type: 'text',
+                  content: textResult.value,
+                  hasStructure: false
+                }
+                console.log('Resolving with text content:', textResult.value.substring(0, 100))
+                resolve(JSON.stringify(structuredContent))
+              } else {
+                console.error('Both HTML and text extraction failed for:', file.name)
+                resolve(JSON.stringify({
+                  type: 'error',
+                  content: `DOCX Document: ${file.name}
+File Size: ${(file.size / 1024).toFixed(2)} KB
+Status: Content extraction failed
+
+Possible reasons:
+- Document contains only images or graphics
+- Document is password protected
+- Document has complex formatting that couldn't be extracted
+- Document file may be corrupted
+
+The document was uploaded successfully but no readable content was found.`,
+                  hasStructure: false
+                }))
+              }
+            }
+            
+            // Log any warnings from mammoth
+            if (htmlResult.messages && htmlResult.messages.length > 0) {
+              console.warn('Mammoth conversion warnings:', htmlResult.messages)
+            }
+          } catch (error) {
+            console.error('Error extracting DOCX content:', error)
+            resolve(JSON.stringify({
+              type: 'error',
+              content: `Error extracting content from DOCX file: ${file.name}
+Error Details: ${(error as Error).message}
+File Size: ${(file.size / 1024).toFixed(2)} KB
+
+This might happen if:
+- The file is corrupted
+- The file uses unsupported DOCX features
+- The file is password protected
+- There are permission issues
+
+Please try re-uploading the file or use a different format.`,
+              hasStructure: false
+            }))
+          }
+        }
+        
+        reader.onerror = () => {
+          console.error('FileReader error for DOCX file:', file.name)
+          reject(new Error("Failed to read DOCX file"))
+        }
+        
+        // Read as ArrayBuffer for mammoth.js
+        reader.readAsArrayBuffer(file)
+      }
+      // Handle legacy .doc files (mammoth doesn't support these)
+      else if (fileType === 'doc') {
+        resolve(JSON.stringify({
+          type: 'text',
+          content: `Legacy DOC Document: ${file.name}
+File Type: Microsoft Word 97-2003 Document (.doc)
+File Size: ${(file.size / 1024).toFixed(2)} KB
+Last Modified: ${new Date(file.lastModified).toLocaleString()}
+Status: Successfully uploaded
+
+⚠️ Important Note:
+Legacy .DOC files use an older binary format that requires specialized server-side processing.
+
+Mammoth.js (used for .DOCX files) does not support .DOC files.
+
+For .DOC file processing, you would need:
+- Server-side libraries like: antiword, textract, unoconv, or LibreOffice
+- Cloud services like: Microsoft Graph API, Google Docs API
+- Or convert the file to .DOCX format first
+
+Recommendation: Please save this file as .DOCX format in Microsoft Word and re-upload for better text extraction.`,
+          hasStructure: false
+        }))
+      }
+      // Handle PDF files
+      else if (fileType === 'pdf') {
+        resolve(JSON.stringify({
+          type: 'text',
+          content: `PDF Document: ${file.name}
+File Size: ${(file.size / 1024).toFixed(2)} KB
+Last Modified: ${new Date(file.lastModified).toLocaleString()}
+Status: Successfully uploaded
+
+📄 PDF Processing Note:
+PDF text extraction requires specialized libraries such as:
+- Client-side: PDF.js, pdf-lib
+- Server-side: pdf-parse, PDFtk, Apache PDFBox
+- Cloud APIs: Adobe PDF Services, Google Cloud Document AI
+
+The PDF file has been uploaded successfully and is ready for server-side processing.`,
+          hasStructure: false
+        }))
+      }
+      else {
+        // For text-based files (JSON, TXT, CSV, XML), read normally
+        const reader = new FileReader()
+        
+        reader.onload = (e) => {
+          const result = e.target?.result as string
+          resolve(JSON.stringify({
+            type: 'text',
+            content: result,
+            hasStructure: false
+          }))
+        }
+        
+        reader.onerror = () => {
+          reject(new Error(`Failed to read ${fileType.toUpperCase()} file`))
+        }
+        
+        // Read as text with UTF-8 encoding
+        reader.readAsText(file, 'UTF-8')
+      }
+    })
+  }
+
   const handleProcess = () => {
     if (uploadedFiles.length === 0) {
       alert('Please upload at least one file first')
       return
     }
 
+    // Show processing state immediately
+    setIsProcessing(true)
+
     // Convert File objects to a format we can store and reconstruct
-    const filePromises = uploadedFiles.map(async (file) => {
-      const content = await readFileAsText(file)
-      return {
-        name: file.name,
-        size: file.size,
-        type: getFileExtension(file.name),
-        content: content, // Store the actual file content
-        lastModified: file.lastModified
+    const filePromises = uploadedFiles.map(async (file, index) => {
+      try {
+        console.log(`Processing file ${index + 1}/${uploadedFiles.length}: ${file.name}`)
+        const content = await readFileAsText(file)
+        
+        return {
+          name: file.name,
+          size: file.size,
+          type: getFileExtension(file.name),
+          content: content, // Store the actual file content
+          lastModified: file.lastModified
+        }
+      } catch (error) {
+        console.error(`Error processing file ${file.name}:`, error)
+        
+        // Return error information instead of failing completely
+        return {
+          name: file.name,
+          size: file.size,
+          type: getFileExtension(file.name),
+          content: `Error processing file: ${file.name}
+Error: ${(error as Error).message}
+File Size: ${(file.size / 1024).toFixed(2)} KB
+
+The file could not be processed. Please try:
+1. Re-uploading the file
+2. Checking if the file is corrupted
+3. Converting to a different format if possible`,
+          lastModified: file.lastModified
+        }
       }
     })
 
@@ -156,32 +381,15 @@ export default function DataPrivacyRedactionTool() {
 
       sessionStorage.setItem('processingData', JSON.stringify(processingData))
 
-      // Show loader and redirect
-      setIsProcessing(true)
+      // Navigate to process page after a delay
       setTimeout(() => {
         setIsProcessing(false)
         router.push('/process')
-      }, 5000)
+      }, 3000) // Reduced to 3 seconds since we're actually processing files now
     }).catch((error) => {
       console.error('Error reading files:', error)
-      alert('Error reading files. Please try again.')
-    })
-  }
-
-  const readFileAsText = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      
-      reader.onload = (e) => {
-        const result = e.target?.result as string
-        resolve(result)
-      }
-      
-      reader.onerror = () => {
-        reject(new Error("Failed to read file"))
-      }
-      
-      reader.readAsText(file, 'UTF-8')
+      setIsProcessing(false)
+      alert(`Error processing files: ${error.message}\n\nPlease try uploading the files again.`)
     })
   }
 
