@@ -11,6 +11,7 @@ from PyPDF2 import PdfReader, PdfWriter
 from langsmith import traceable
 from langchain_google_genai import ChatGoogleGenerativeAI
 import numpy as np
+import docx
 import time
 
 load_dotenv()
@@ -39,24 +40,35 @@ class RunnerAgent:
         if file_path.endswith(".pdf"):
             reader = PdfReader(file_path)
             text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+
         elif file_path.endswith(".txt"):
             with open(file_path, "r", encoding="utf-8") as f:
                 text = f.read()
-        elif file_path.lower().endswith((".jpg", ".jpeg", ".png")):
-            image = cv2.imread(file_path)
-            text = pytesseract.image_to_string(image)
+
+        elif file_path.endswith(".json"):
+            with open(file_path, "r", encoding="utf-8") as f:
+                self.json_data = json.load(f)
+                text = json.dumps(self.json_data, indent=2)
+
+        elif file_path.endswith(".docx"):
+            doc = docx.Document(file_path)
+            text = "\n".join([para.text for para in doc.paragraphs])
+
         else:
-            raise ValueError("Unsupported file type. Use PDF, TXT, or JPG/PNG.")
+            raise ValueError("Unsupported file type. Use PDF, TXT, JSON, or DOCX.")
+        
         return text
-    
+
     def get_file_type(self, file_path: str) -> str:
         """Determine the file type"""
         if file_path.endswith(".pdf"):
             return "pdf"
         elif file_path.endswith(".txt"):
             return "txt"
-        elif file_path.lower().endswith((".jpg", ".jpeg", ".png")):
-            return "image"
+        elif file_path.endswith(".json"):
+            return "json"
+        elif file_path.endswith(".docx"):
+            return "docx"
         else:
             raise ValueError("Unsupported file type")
 
