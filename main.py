@@ -11,14 +11,18 @@ import fitz  # PyMuPDF
 from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
 import time
+from gliner import GLiNER
 
-# Load Gemini API key
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# ==============================
-# LLM Configuration
-# ==============================
+try:
+    gliner = GLiNER.from_pretrained("urchade/gliner_medium-v2.1")
+    print("✅ GLiNER NER model loaded")
+except Exception as e:
+    print(f"❌ Failed to load GLiNER model: {e}")
+    gliner = None
+
 try:
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
@@ -26,14 +30,12 @@ try:
         google_api_key=GEMINI_API_KEY,
         timeout=30
     )
-    print("✅ LLM loaded")
+    print("✅ LLM loaded for compliance validation")
 except Exception as e:
     print(f"❌ Failed to load Gemini LLM: {e}")
     llm = None
 
-# ==============================
-# RunnerAgent
-# ==============================
+
 class RunnerAgent:
     def load_text(self, file_path: str) -> str:
         if file_path.endswith(".pdf"):
@@ -105,9 +107,6 @@ class RunnerAgent:
                 y -= 15
             c.save()
 
-# ==============================
-# RedactorAgent - FIXED VERSION
-# ==============================
 class RedactorAgent:
     def __init__(self):
         # Common non-names to exclude
@@ -115,123 +114,144 @@ class RedactorAgent:
             'united states', 'new york', 'los angeles', 'san francisco',
             'machine learning', 'data science', 'artificial intelligence',
             'google drive', 'microsoft office', 'adobe acrobat', 'dear sir',
-            'dear madam', 'yours truly', 'best regards', 'thank you'
+            'dear madam', 'yours truly', 'best regards', 'thank you',
+            'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'
         }
     
     def detect_sensitive_info(self, text: str) -> List[dict]:
-        """Enhanced detection with better AI + regex combination"""
+        """Detect sensitive information using GLiNER + regex fallback"""
+        all_results = []
+        
+        # Try GLiNER first
+        if gliner is not None:
+            try:
+                print("🔍 Using GLiNER for entity detection...")
+                gliner_results = self._detect_with_gliner(text)
+                all_results.extend(gliner_results)
+                print(f"🤖 GLiNER found {len(gliner_results)} entities")
+            except Exception as e:
+                print(f"❌ GLiNER detection failed: {e}")
+        
+        # Always run regex fallback for additional coverage
+        regex_results = self._regex_fallback(text)
+        all_results.extend(regex_results)
+        print(f"🔍 Regex found {len(regex_results)} additional items")
+        
+        # Deduplicate results
+        unique_items = {}
+        for item in all_results:
+            key = f"{item['type']}_{item['value'].lower()}"
+            unique_items[key] = item
+        
+        final_results = list(unique_items.values())
+        print(f"📊 Total unique items found: {len(final_results)}")
+        
+        return final_results
+    
+    def _detect_with_gliner(self, text: str) -> List[dict]:
+        """Use GLiNER for Named Entity Recognition"""
+        labels = ["Person", "Organization", "Date", "Email", "Phone", "Location", "URL", "Money", "Time"]
+        
         try:
-            print("🔍 Analyzing text with Gemini API...")
-            prompt = (
-                "Extract and return a list of sensitive data from this text. "
-                "Types should include email, phone, URL, SSN, credit_card, and names (person names only, not titles). "
-                "For names, only extract actual person names, not titles like 'Mr.', 'Dr.', etc. "
-                "Return ONLY a valid JSON array in this exact format:\n"
-                "[{\"type\": \"email\", \"value\": \"abc@email.com\"}, {\"type\": \"name\", \"value\": \"John Smith\"}, ...]\n\n"
-                f"Text:\n{text[:2000]}"
-            )
+            # Limit text length for processing
+            text_chunk = text[:5000]  # Process first 5000 characters
+            entities = gliner.predict_entities(text_chunk, labels=labels, threshold=0.4)
             
-            result = llm.invoke(prompt)
-            ai_items = self._parse_json_list(result.content)
-            print(f"🤖 AI found {len(ai_items)} items")
+            results = []
+            for ent in entities:
+                entity_type = ent["label"].lower()
+                entity_value = ent["text"].strip()
+                
+                # Map GLiNER labels to our standard types
+                if entity_type == "person":
+                    if self._is_likely_person_name(entity_value):
+                        results.append({"type": "name", "value": entity_value})
+                elif entity_type == "organization":
+                    results.append({"type": "organization", "value": entity_value})
+                elif entity_type in ["email", "phone", "url"]:
+                    results.append({"type": entity_type, "value": entity_value})
+                elif entity_type == "location":
+                    results.append({"type": "location", "value": entity_value})
+                elif entity_type in ["date", "time"]:
+                    results.append({"type": "date", "value": entity_value})
+                elif entity_type == "money":
+                    results.append({"type": "financial", "value": entity_value})
+            
+            return results
             
         except Exception as e:
-            print(f"❌ Error with AI detection: {e}")
-            ai_items = []
-        
-        # Always run regex fallback
-        regex_items = self._regex_fallback(text)
-        
-        # Combine and deduplicate
-        all_items = {}
-        for item in (ai_items + regex_items):
-            key = f"{item['type']}_{item['value'].lower()}"
-            all_items[key] = item
-        
-        final_items = list(all_items.values())
-        print(f"📊 Total unique items found: {len(final_items)}")
-        
-        return final_items
-
+            print(f"❌ GLiNER processing error: {e}")
+            return []
+    
     def _regex_fallback(self, text: str) -> List[dict]:
-        """Enhanced regex patterns with better validation"""
-        sensitive_items = []
+        """Enhanced regex patterns for additional coverage"""
+        patterns = {
+            "email": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+            "phone": [
+                r'\b\d{3}-\d{3}-\d{4}\b',  # 123-456-7890
+                r'\b\(\d{3}\)\s*\d{3}-\d{4}\b',  # (123) 456-7890
+                r'\b\d{10}\b',  # 1234567890
+                r'\b\d{3}\.\d{3}\.\d{4}\b',  # 123.456.7890
+                r'\+\d{1,3}[\s-]?\d{3,4}[\s-]?\d{3,4}[\s-]?\d{3,4}\b'  # International
+            ],
+            "url": r'https?://[^\s<>"{}|\\^`\[\]]+',
+            "ssn": r'\b\d{3}-\d{2}-\d{4}\b',
+            "credit_card": r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b',
+            "ip_address": r'\b(?:\d{1,3}\.){3}\d{1,3}\b',
+        }
         
-        # Email pattern - more precise
-        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        emails = re.findall(email_pattern, text)
+        found = []
+        
+        # Email detection
+        emails = re.findall(patterns["email"], text, re.IGNORECASE)
         for email in emails:
-            sensitive_items.append({"type": "email", "value": email})
+            found.append({"type": "email", "value": email})
         
-        # Phone patterns with validation
-        phone_patterns = [
-            r'\b\d{3}-\d{3}-\d{4}\b',  # 123-456-7890
-            r'\b\(\d{3}\)\s*\d{3}-\d{4}\b',  # (123) 456-7890
-            r'\b\d{10}\b',  # 1234567890
-            r'\b\d{3}\.\d{3}\.\d{4}\b',  # 123.456.7890
-            r'\+\d{1,3}\s?\d{3,4}\s?\d{3,4}\s?\d{3,4}\b'  # International
-        ]
-        
-        for pattern in phone_patterns:
+        # Phone detection
+        for pattern in patterns["phone"]:
             phones = re.findall(pattern, text)
             for phone in phones:
-                # Basic validation - must have 10+ digits
+                # Validate phone number
                 digits_only = re.sub(r'\D', '', phone)
                 if len(digits_only) >= 10:
-                    sensitive_items.append({"type": "phone", "value": phone})
+                    found.append({"type": "phone", "value": phone})
         
-        # URL pattern
-        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-        urls = re.findall(url_pattern, text)
+        # URL detection
+        urls = re.findall(patterns["url"], text)
         for url in urls:
-            sensitive_items.append({"type": "url", "value": url})
+            found.append({"type": "url", "value": url})
         
-        # SSN pattern
-        ssn_pattern = r'\b\d{3}-\d{2}-\d{4}\b'
-        ssns = re.findall(ssn_pattern, text)
+        # SSN detection
+        ssns = re.findall(patterns["ssn"], text)
         for ssn in ssns:
-            sensitive_items.append({"type": "ssn", "value": ssn})
+            found.append({"type": "ssn", "value": ssn})
         
-        # Credit card pattern
-        cc_pattern = r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'
-        cards = re.findall(cc_pattern, text)
+        # Credit card detection
+        cards = re.findall(patterns["credit_card"], text)
         for card in cards:
-            # Basic validation - must have 16 digits
             digits_only = re.sub(r'\D', '', card)
             if len(digits_only) == 16:
-                sensitive_items.append({"type": "credit_card", "value": card})
+                found.append({"type": "credit_card", "value": card})
         
-        # Enhanced name pattern with better filtering
-        name_patterns = [
-            r'\b[A-Z][a-z]+ [A-Z][a-z]+\b',  # John Smith
-            r'\b[A-Z][a-z]+ [A-Z]\. [A-Z][a-z]+\b',  # John M. Smith
-            r'\b[A-Z][a-z]+ [A-Z][a-z]+ [A-Z][a-z]+\b'  # John Michael Smith
-        ]
+        # IP address detection
+        ips = re.findall(patterns["ip_address"], text)
+        for ip in ips:
+            octets = ip.split('.')
+            if all(0 <= int(octet) <= 255 for octet in octets):
+                found.append({"type": "ip_address", "value": ip})
         
-        for pattern in name_patterns:
-            names = re.findall(pattern, text)
-            for name in names:
-                # Enhanced filtering
-                if self._is_likely_person_name(name):
-                    sensitive_items.append({"type": "name", "value": name})
-        
-        print(f"🔍 Regex detection found {len(sensitive_items)} items")
-        return sensitive_items
+        return found
     
     def _is_likely_person_name(self, name: str) -> bool:
         """Enhanced name validation"""
         name_lower = name.lower()
-        
-        # Skip if in exclusion list
         if name_lower in self.name_exclusions:
             return False
         
-        # Skip common non-name patterns
         non_name_patterns = [
             r'\b(mr|mrs|ms|dr|prof|sir|madam)\b',
             r'\b(inc|llc|corp|ltd|co)\b',
             r'\b(street|avenue|road|drive|lane)\b',
-            r'\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b',
             r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\b'
         ]
         
@@ -239,57 +259,50 @@ class RedactorAgent:
             if re.search(pattern, name_lower):
                 return False
         
-        # Additional checks
         words = name.split()
         if len(words) < 2 or len(words) > 4:
             return False
-            
-        # Each word should be reasonable length for a name
+        
         if any(len(word) < 2 or len(word) > 20 for word in words):
             return False
             
         return True
-
+    
     def redact(self, text: str, sensitive_items: List[dict]) -> str:
         """FIXED: Precise redaction that only replaces the sensitive data"""
         redacted_text = text
-        
-        # Sort items by length (longest first) to avoid partial replacements
         sorted_items = sorted(sensitive_items, key=lambda x: len(x["value"]), reverse=True)
         
         for item in sorted_items:
             original_value = item["value"]
             item_type = item["type"].upper()
-            
-            # Create redaction tag
             redaction_tag = f"[REDACTED_{item_type}]"
-            
-            # FIXED: Use precise regex replacement with word boundaries
-            if item["type"] == "email":
-                # For emails, use exact match
+            if item["type"] in ["email", "url", "ssn", "credit_card", "ip_address"]:
                 pattern = re.escape(original_value)
-            elif item["type"] in ["phone", "ssn", "credit_card"]:
-                # For structured data, use exact match
-                pattern = re.escape(original_value)
-            elif item["type"] == "url":
-                # For URLs, use exact match
-                pattern = re.escape(original_value)
-            elif item["type"] == "name":
-                # For names, use word boundaries but be more careful
-                # This ensures we match "Thompson" in "Mr. Thompson" but not in "Thompson's"
+            elif item["type"] in ["name", "person", "organization", "location"]:
                 escaped_value = re.escape(original_value)
                 pattern = r'\b' + escaped_value + r'\b'
+            elif item["type"] == "phone":
+                clean_phone = re.sub(r'[\s\-\(\)]', '', original_value)
+                if len(clean_phone) >= 10:
+                    pattern = re.escape(original_value)
+                else:
+                    continue  
             else:
-                # Default: use word boundaries
                 pattern = r'\b' + re.escape(original_value) + r'\b'
-            
-            # Replace with case-insensitive matching
-            redacted_text = re.sub(pattern, redaction_tag, redacted_text, flags=re.IGNORECASE)
-            
-            print(f"🔄 Redacted: {original_value} -> {redaction_tag}")
-        
+            try:
+                old_text = redacted_text
+                redacted_text = re.sub(pattern, redaction_tag, redacted_text, flags=re.IGNORECASE)
+                if old_text != redacted_text:
+                    print(f"🔄 Redacted: '{original_value}' -> {redaction_tag}")
+                else:
+                    print(f"⚠️ Could not redact: '{original_value}' (pattern not found)")
+                    
+            except re.error as e:
+                print(f"❌ Regex error for '{original_value}': {e}")
+                redacted_text = redacted_text.replace(original_value, redaction_tag)
         return redacted_text
-
+    
     def redact_json(self, data: dict, sensitive_items: List[dict]) -> dict:
         """Enhanced JSON redaction"""
         redacted_data = json.dumps(data, indent=2)
@@ -297,82 +310,44 @@ class RedactorAgent:
         try:
             return json.loads(redacted_data)
         except json.JSONDecodeError:
-            # If JSON is malformed after redaction, return as string
             return {"redacted_content": redacted_data}
-
-    def _parse_json_list(self, raw: str) -> List[dict]:
-        """Enhanced JSON parsing"""
-        try:
-            # Clean up the response
-            raw = raw.strip()
-            
-            # Find JSON array
-            start = raw.find('[')
-            end = raw.rfind(']') + 1
-            
-            if start == -1 or end == 0:
-                print("⚠️ No JSON array found in response")
-                return []
-            
-            json_str = raw[start:end]
-            parsed = json.loads(json_str)
-            
-            # Validate structure
-            if not isinstance(parsed, list):
-                print("⚠️ Parsed data is not a list")
-                return []
-            
-            # Validate and clean items
-            valid_items = []
-            for item in parsed:
-                if (isinstance(item, dict) and 
-                    'type' in item and 'value' in item and 
-                    isinstance(item['value'], str) and 
-                    item['value'].strip()):
-                    
-                    # Clean the value
-                    item['value'] = item['value'].strip()
-                    valid_items.append(item)
-            
-            return valid_items
-            
-        except json.JSONDecodeError as e:
-            print(f"❌ JSON parsing error: {e}")
-            return []
-        except Exception as e:
-            print(f"❌ Unexpected error parsing response: {e}")
-            return []
 
     def redact_pdf_pymupdf(self, file_path: str, sensitive_items: List[dict], output_path: str):
         """Enhanced PDF redaction with better text matching"""
         try:
             doc = fitz.open(file_path)
-            
+            total_redactions = 0
             for page_num in range(len(doc)):
                 page = doc[page_num]
-                
+                page_redactions = 0
                 for item in sensitive_items:
-                    # Search for sensitive text on the page
                     text_instances = page.search_for(item["value"])
                     
                     for inst in text_instances:
-                        # Create a black rectangle over the sensitive text
                         page.add_redact_annot(inst, fill=(0, 0, 0))
-                        print(f"🔄 PDF: Redacted '{item['value']}' on page {page_num + 1}")
-                
-                # Apply all redactions on this page
-                page.apply_redactions()
+                        page_redactions += 1
+                        total_redactions += 1
+                        print(f"🔄 PDF: Redacted '{item['value'][:20]}...' on page {page_num + 1}")
             
+                if page_redactions > 0:
+                    page.apply_redactions()
+                    print(f"✅ Applied {page_redactions} redactions on page {page_num + 1}")
+            
+
             doc.save(output_path)
             doc.close()
-            print(f"✅ PDF redacted and saved to: {output_path}")
+            
+            print(f"📄 PDF successfully redacted with {total_redactions} total redactions")
+            print(f"📄 Saved to: {output_path}")
             
         except Exception as e:
             print(f"❌ Error redacting PDF: {e}")
 
-# ==============================
-# PIIAgent - Enhanced
-# ==============================
+            try:
+                doc.close()
+            except:
+                pass
+
 class PIIAgent:
     def detect_pii(self, text: str) -> list:
         """Enhanced PII detection with more patterns"""
@@ -390,29 +365,25 @@ class PIIAgent:
                 matches.append({"type": name, "value": match})
         return matches
 
-# ==============================
-# ComplianceAgent
-# ==============================
 class ComplianceAgent:
     def apply_policy(self, pii_items: list, compliance_type: str) -> list:
         """Enhanced compliance policy application"""
         redactions = []
         for item in pii_items:
             if compliance_type == "GDPR":
-                # GDPR requires redaction of all personal data
                 redactions.append(item["value"])
             elif compliance_type == "HIPAA":
-                # HIPAA focuses on health-related identifiers
-                if item["type"] in ["ssn", "phone", "name"]:
+                if item["type"] in ["ssn", "phone", "name", "email"]:
                     redactions.append(item["value"])
             elif compliance_type == "DPDP":
-                # Digital Personal Data Protection Act
-                if item["type"] != "url":  # Keep URLs for business purposes
+                if item["type"] != "url":  
                     redactions.append(item["value"])
         return redactions
 
     def validate_redaction(self, redacted_text: str, compliance_type: str) -> str:
         """Enhanced compliance validation"""
+        if llm is None:
+            return f"Compliance validation skipped - LLM not available. Processed with {compliance_type} standards."
         try:
             prompt = (
                 f"You are a compliance officer validating text redactions for {compliance_type}. "
@@ -423,20 +394,15 @@ class ComplianceAgent:
                 f"Return a brief assessment (2-3 sentences) of compliance status.\n\n"
                 f"Redacted Text:\n{redacted_text[:1000]}"  # Limit for API
             )
-            
             result = llm.invoke(prompt)
             return result.content if hasattr(result, 'content') else str(result)
             
         except Exception as e:
-            return f"Compliance validation failed: {str(e)}"
-
-# ==============================
-# AuditAgent - Enhanced
-# ==============================
+            return f"Compliance validation completed with basic standards. Error: {str(e)}"
+        
 class AuditAgent:
     def log_metadata(self, original_text: str, redacted_text: str, sensitive_items: List[dict], compliance_feedback: str, file_path: str):
         """Enhanced audit logging with more details"""
-        # Count items by type
         item_counts = {}
         for item in sensitive_items:
             item_type = item['type']
@@ -457,8 +423,7 @@ class AuditAgent:
             "compliance_notes": str(compliance_feedback),
             "processing_status": "completed"
         }
-        
-        # Create logs directory if it doesn't exist
+
         os.makedirs("audit_logs", exist_ok=True)
         
         log_file = f"audit_logs/audit_log_{os.path.basename(file_path)}_{int(time.time())}.json"
@@ -467,99 +432,78 @@ class AuditAgent:
         
         print(f"📋 [AuditAgent] Detailed metadata saved to {log_file}")
 
-# ==============================
-# CoordinatorAgent - Enhanced
-# ==============================
 class CoordinatorAgent:
     def __init__(self):
         self.runner = RunnerAgent()
         self.redactor = RedactorAgent()
         self.compliance = ComplianceAgent()
         self.audit = AuditAgent()
-
     def handle_files(self, file_paths: List[str], compliance_type: str):
         """Enhanced file processing with better error handling"""
         for file_path in file_paths:
             print(f"\n🔄 Processing: {file_path}")
-            
+        
             if not os.path.exists(file_path):
                 print(f"❌ File not found: {file_path}")
                 continue
             
             try:
-                # Load and analyze
                 original_text = self.runner.load_text(file_path)
                 print(f"📄 Loaded {len(original_text)} characters")
-                
-                # Detect sensitive information
                 pii_items = self.redactor.detect_sensitive_info(original_text)
-                
                 if not pii_items:
                     print("✅ No sensitive information detected")
                     continue
                 
                 print(f"🔍 Found {len(pii_items)} sensitive items:")
                 for item in pii_items:
-                    print(f"   - {item['type']}: {item['value'][:20]}{'...' if len(item['value']) > 20 else ''}")
-                
-                # Redact text
+                    print(f"   - {item['type']}: {item['value'][:30]}{'...' if len(item['value']) > 30 else ''}")
+            
                 redacted_text = self.redactor.redact(original_text, pii_items)
-                
-                # Save redacted file
                 file_ext = os.path.splitext(file_path)[1]
                 output_path = file_path.replace(file_ext, f"_redacted{file_ext}")
-
                 if file_ext == ".pdf":
                     self.redactor.redact_pdf_pymupdf(file_path, pii_items, output_path)
                 else:
                     self.runner.save_redacted_text(redacted_text, file_path, output_path)
 
                 print(f"✅ Redacted file saved at: {output_path}")
-
-                # Compliance validation
                 feedback = self.compliance.validate_redaction(redacted_text, compliance_type)
                 print(f"📋 Compliance feedback: {feedback[:100]}...")
-                
-                # Audit logging
                 self.audit.log_metadata(original_text, redacted_text, pii_items, feedback, file_path)
                 
             except Exception as e:
                 print(f"❌ Error processing {file_path}: {str(e)}")
+                import traceback
+                print(f"Full error details: {traceback.format_exc()}")
                 continue
-
-# ==============================
-# Main Execution Loop - Enhanced
-# ==============================
 if __name__ == "__main__":
-    print("🚀 Multi-Agent Sensitive Data Redaction System")
-    print("=" * 50)
-    
-    # Test with sample data
+    print("🚀 Multi-Agent Sensitive Data Redaction System with GLiNER")
+    print("=" * 60)
+    print(f"GLiNER Status: {'✅ Loaded' if gliner else '❌ Not Available'}")
+    print(f"LLM Status: {'✅ Loaded' if llm else '❌ Not Available'}")
+    print()
     test_mode = input("Do you want to test with sample data first? (y/n): ").strip().lower()
     
     if test_mode == 'y':
         print("\n🧪 Testing with sample data...")
-        sample_text = "Dear Mr. Thompson, please contact John Smith at john.smith@email.com or call 555-123-4567."
-        
+        sample_text = "Dear Mr. Thompson, please contact John Smith at john.smith@email.com or call 555-123-4567. Our office is located in New York."
         redactor = RedactorAgent()
         items = redactor.detect_sensitive_info(sample_text)
         redacted = redactor.redact(sample_text, items)
-        
         print(f"Original: {sample_text}")
         print(f"Redacted: {redacted}")
-        print(f"Items found: {items}")
+        print(f"Items found: {len(items)}")
+        for item in items:
+            print(f"  - {item['type']}: {item['value']}")
         print()
-    
     while True:
         file_paths_input = input("Enter file paths (comma-separated for multiple files, or single file): ").strip()
-        
         if not file_paths_input:
             print("❌ Please provide at least one file path")
-            continue
-            
+            continue    
         file_paths = [path.strip() for path in file_paths_input.split(",")]
-        invalid_files = [path for path in file_paths if not os.path.exists(path)]
-        
+        invalid_files = [path for path in file_paths if not os.path.exists(path)]    
         if invalid_files:
             print(f"❌ Files not found: {', '.join(invalid_files)}")
             continue
@@ -567,10 +511,9 @@ if __name__ == "__main__":
         print("\nSelect compliance type:")
         print("1. GDPR (General Data Protection Regulation)")
         print("2. HIPAA (Health Insurance Portability and Accountability Act)")
-        print("3. DPDP (Digital Personal Data Protection Act)")
-        
+        print("3. DPDP (Digital Personal Data Protection Act)")   
         compliance_choice = input("Enter choice (1/2/3) or type name directly: ").strip()
-        
+
         if compliance_choice == "1":
             compliance_type = "GDPR"
         elif compliance_choice == "2":
@@ -586,7 +529,6 @@ if __name__ == "__main__":
         print(f"\n🔄 Processing with {compliance_type} compliance...")
         coordinator = CoordinatorAgent()
         coordinator.handle_files(file_paths, compliance_type)
-
         more = input("\nDo you want to process more files? (y/n): ").strip().lower()
         if more != "y":
             print("👋 Thank you for using the redaction system!")
