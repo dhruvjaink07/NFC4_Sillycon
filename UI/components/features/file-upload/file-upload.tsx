@@ -39,12 +39,24 @@ export function FileUpload({ onProcessFiles }: FileUploadProps) {
   const handleFileSelect = (files: FileList) => {
     const validFiles: UploadedFile[] = []
     const errors: string[] = []
-    
+
+    // Determine the type of already uploaded files
+    const existingType = uploadedFiles.length > 0
+      ? '.' + uploadedFiles[0].name.split('.').pop()?.toLowerCase()
+      : null
+
     Array.from(files).forEach((file) => {
-      // Validate file type
       const fileExtension = '.' + file.name.split('.').pop()?.toLowerCase()
+
+      // Validate file type
       if (!acceptedTypes.includes(fileExtension)) {
         errors.push(`File type not supported for ${file.name}. Please upload: ${acceptedTypes.join(', ')}`)
+        return
+      }
+
+      // Enforce single file type selection
+      if (existingType && fileExtension !== existingType) {
+        errors.push(`All files must be of the same type. You already selected ${existingType} files.`)
         return
       }
 
@@ -65,7 +77,7 @@ export function FileUpload({ onProcessFiles }: FileUploadProps) {
         name: file.name,
         id: Math.random().toString(36).substr(2, 9),
         size: file.size,
-        type: file.type || 'application/octet-stream',
+        type: file.type || 'application/octet-stream'
         file: file
       })
     })
@@ -75,8 +87,11 @@ export function FileUpload({ onProcessFiles }: FileUploadProps) {
       alert(errors.join('\n'))
     }
 
+    // Only allow files of the same type as the first uploaded file
     if (validFiles.length > 0) {
-      setUploadedFiles(prev => [...prev, ...validFiles])
+      const typeToKeep = existingType || ('.' + validFiles[0].name.split('.').pop()?.toLowerCase())
+      const filteredFiles = validFiles.filter(f => '.' + f.name.split('.').pop()?.toLowerCase() === typeToKeep)
+      setUploadedFiles(prev => [...prev, ...filteredFiles])
     }
   }
 

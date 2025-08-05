@@ -5,7 +5,6 @@ import { ThemeProvider } from "@/components/providers/theme-provider"
 import { Header } from "@/components/layout/header"
 import { FileUpload } from "@/components/features/file-upload/file-upload"
 import { ComplianceSelector } from "@/components/features/compliance/compliance-selector"
-import { EncryptionSelector } from "@/components/features/encryption/encryption-selector"
 import { DocumentPreview } from "@/components/features/document/document-preview"
 import { ValidationSummary } from "@/components/features/validation/validation-summary"
 import { ActionButtons } from "@/components/features/actions/action-buttons"
@@ -68,15 +67,21 @@ export default function DataPrivacyRedactionTool() {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.6, delay: 1.0 }}
               >
-                <ComplianceSelector value={complianceMode} onChange={setComplianceMode} />
+                <ComplianceSelector 
+                  complianceValue={complianceMode} 
+                  encryptionValue={encryptionMethod}
+                  onComplianceChange={setComplianceMode}
+                  onEncryptionChange={setEncryptionMethod}
+                />
               </motion.div>
 
+              {/* Redaction Logs: full width under Compliance/Encryption */}
               <motion.div
                 initial={{ opacity: 0, y: 40 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.6, delay: 1.2 }}
               >
-                {/* <EncryptionSelector value={encryptionMethod} onChange={setEncryptionMethod} /> */}
+                <RedactionLogs />
               </motion.div>
 
               {showPreview && <DocumentPreview />}
@@ -85,12 +90,10 @@ export default function DataPrivacyRedactionTool() {
             {/* Right Column */}
             <div className="space-y-8">
               <ValidationSummary validationComplete={validationComplete} />
-
               <ActionButtons />
+              {/* Remove RedactionLogs from here */}
             </div>
           </div>
-
-          {showPreview && <RedactionLogs />}
 
           <Footer />
         </div>

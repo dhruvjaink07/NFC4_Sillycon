@@ -222,7 +222,7 @@ export function ComplianceSelector({ onSelectionChange }: ComplianceSelectorProp
       </div>
 
       {/* Protected Entity Types */}
-      <Card className="shadow-xl border-0 backdrop-blur-sm transition-colors duration-300 bg-white/90 dark:bg-gray-800/90">
+      {/* <Card className="shadow-xl border-0 backdrop-blur-sm transition-colors duration-300 bg-white/90 dark:bg-gray-800/90">
         <CardHeader className="transition-colors duration-300 bg-gradient-to-r from-green-50 to-blue-50 dark:from-green-900/50 dark:to-blue-900/50">
           <CardTitle className="flex items-center gap-3 text-xl transition-colors duration-300 text-gray-900 dark:text-white">
             <Lock className="w-6 h-6 text-green-600 dark:text-green-400" />
@@ -256,7 +256,7 @@ export function ComplianceSelector({ onSelectionChange }: ComplianceSelectorProp
             ))}
           </motion.div>
         </CardContent>
-      </Card>
+      </Card> */}
     </div>
   )
 }
