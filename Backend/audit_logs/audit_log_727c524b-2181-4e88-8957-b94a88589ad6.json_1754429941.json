@@ -1,0 +1,38 @@
+{
+  "timestamp": "2025-08-06 03:09:01",
+  "file_path": "C:\\Users\\Jain\\AppData\\Local\\Temp\\tmpa2en4gdc\\727c524b-2181-4e88-8957-b94a88589ad6.json",
+  "file_size": 211,
+  "original_length": 204,
+  "redacted_length": 197,
+  "total_redacted_items": 5,
+  "redacted_items_by_type": {
+    "email": 1,
+    "phone": 2,
+    "url": 1,
+    "ssn": 1
+  },
+  "redacted_items": [
+    {
+      "type": "email",
+      "value_length": 23
+    },
+    {
+      "type": "phone",
+      "value_length": 12
+    },
+    {
+      "type": "phone",
+      "value_length": 15
+    },
+    {
+      "type": "url",
+      "value_length": 18
+    },
+    {
+      "type": "ssn",
+      "value_length": 11
+    }
+  ],
+  "compliance_notes": "The current redactions are **not compliant with GDPR standards** as the individual's name (\"Emma Wilson\") and full address (\"456 Oak Avenue, San Francisco, CA\") remain unredacted, constituting clear personal identifiable information. While the formatting for redacted fields like email, phone, SSN, and website is appropriate, the presence of unredacted PII is a critical failure. This document would fail a GDPR compliance audit.",
+  "processing_status": "completed"
+}
