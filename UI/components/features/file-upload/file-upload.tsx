@@ -77,7 +77,7 @@ export function FileUpload({ onProcessFiles }: FileUploadProps) {
         name: file.name,
         id: Math.random().toString(36).substr(2, 9),
         size: file.size,
-        type: file.type || 'application/octet-stream'
+        type: file.type || 'application/octet-stream',
         file: file
       })
     })
