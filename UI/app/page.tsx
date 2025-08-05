@@ -49,16 +49,25 @@ export default function DataPrivacyRedactionTool() {
       const newFiles: File[] = []
       let currentAllowedType = allowedFileType
       
+      // If this is the first upload and no type is set, use the first file's type
+      if (!currentAllowedType && files.length > 0) {
+        currentAllowedType = getFileExtension(files[0].name)
+      }
+      
+      // Check all files before processing any
+      const invalidFiles: string[] = []
+      const validFiles: File[] = []
+      
       for (const file of files) {
         const fileExtension = getFileExtension(file.name)
         
         // If this is the very first file being uploaded (no allowed type set yet)
-        if (!currentAllowedType) {
-          currentAllowedType = fileExtension  // Set the allowed type based on first file
-          setAllowedFileType(fileExtension)
-          newFiles.push(file)
+        if (!allowedFileType && validFiles.length === 0) {
+          // Set the allowed type based on first valid file
+          currentAllowedType = fileExtension
+          validFiles.push(file)
         } 
-        // For all subsequent files (including in the same upload batch), check if they match the allowed type
+        // Check if file matches the allowed type (either existing or from first file in this batch)
         else if (fileExtension === currentAllowedType) {
           // Check if file already exists (by name and size)
           const fileExists = uploadedFiles.some(existingFile => 
@@ -66,21 +75,33 @@ export default function DataPrivacyRedactionTool() {
           )
           
           if (!fileExists) {
-            newFiles.push(file)
+            validFiles.push(file)
           }
         } 
-        // If file type doesn't match, show error and stop processing
+        // If file type doesn't match, add to invalid list
         else {
-          alert(`Only ${currentAllowedType.toUpperCase()} files are allowed. Please select ${currentAllowedType.toUpperCase()} files or remove current files to upload a different type.`)
-          event.target.value = ''
-          return  // Stops processing and rejects different file types
+          invalidFiles.push(`${file.name} (${fileExtension.toUpperCase()})`)
         }
       }
       
-      // Only add files if we have valid ones
-      if (newFiles.length > 0) {
-        setUploadedFiles(prev => [...prev, ...newFiles])
+      // If there are invalid files, reject the entire upload
+      if (invalidFiles.length > 0) {
+        const allowedTypeText = currentAllowedType ? currentAllowedType.toUpperCase() : 'the selected type'
+        alert(`Invalid file types detected!\n\nOnly ${allowedTypeText} files are allowed.\n\nRejected files:\n${invalidFiles.join('\n')}\n\nPlease select only ${allowedTypeText} files or remove current files to upload a different type.`)
+        event.target.value = ''
+        return
       }
+      
+      // If all files are valid, process them
+      if (validFiles.length > 0) {
+        // Set the allowed type if this is the first upload
+        if (!allowedFileType) {
+          setAllowedFileType(currentAllowedType)
+        }
+        
+        setUploadedFiles(prev => [...prev, ...validFiles])
+      }
+      
       event.target.value = '' // Clear input
     }
   }
@@ -111,27 +132,57 @@ export default function DataPrivacyRedactionTool() {
       return
     }
 
-    // Store data in sessionStorage
-    sessionStorage.setItem('processingData', JSON.stringify({
-      files: uploadedFiles.map(file => ({
+    // Convert File objects to a format we can store and reconstruct
+    const filePromises = uploadedFiles.map(async (file) => {
+      const content = await readFileAsText(file)
+      return {
         name: file.name,
         size: file.size,
-        type: getFileExtension(file.name)
-      })),
-      fileCount: uploadedFiles.length,
-      totalSize: uploadedFiles.reduce((sum, file) => sum + file.size, 0),
-      complianceMode,
-      encryptionMethod
-    }))
+        type: getFileExtension(file.name),
+        content: content, // Store the actual file content
+        lastModified: file.lastModified
+      }
+    })
 
-    // Show loader
-    setIsProcessing(true)
+    Promise.all(filePromises).then((filesWithContent) => {
+      // Store processing data with file content
+      const processingData = {
+        files: filesWithContent,
+        fileCount: uploadedFiles.length,
+        totalSize: uploadedFiles.reduce((sum, file) => sum + file.size, 0),
+        complianceMode,
+        encryptionMethod
+      }
 
-    // Redirect after 5 seconds
-    setTimeout(() => {
-      setIsProcessing(false)
-      router.push('/process')
-    }, 5000)
+      sessionStorage.setItem('processingData', JSON.stringify(processingData))
+
+      // Show loader and redirect
+      setIsProcessing(true)
+      setTimeout(() => {
+        setIsProcessing(false)
+        router.push('/process')
+      }, 5000)
+    }).catch((error) => {
+      console.error('Error reading files:', error)
+      alert('Error reading files. Please try again.')
+    })
+  }
+
+  const readFileAsText = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      
+      reader.onload = (e) => {
+        const result = e.target?.result as string
+        resolve(result)
+      }
+      
+      reader.onerror = () => {
+        reject(new Error("Failed to read file"))
+      }
+      
+      reader.readAsText(file, 'UTF-8')
+    })
   }
 
   const getTotalSize = () => {
