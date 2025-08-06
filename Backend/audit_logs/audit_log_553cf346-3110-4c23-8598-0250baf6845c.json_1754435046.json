@@ -1,0 +1,19 @@
+{
+  "timestamp": "2025-08-06 04:34:06",
+  "file_path": "C:\\Users\\Jain\\AppData\\Local\\Temp\\tmp78i8edj2\\553cf346-3110-4c23-8598-0250baf6845c.json",
+  "file_size": 720,
+  "original_length": 693,
+  "redacted_length": 684,
+  "total_redacted_items": 1,
+  "redacted_items_by_type": {
+    "email": 1
+  },
+  "redacted_items": [
+    {
+      "type": "email",
+      "value_length": 25
+    }
+  ],
+  "compliance_notes": "This redaction is critically flawed and **non-compliant** with GDPR standards. Significant Personal Identifiable Information (PII) like the user's full name, user ID (also visible in the access token), and username remain unredacted. Furthermore, highly sensitive credentials such as the password and 2FA recovery codes are exposed, representing a severe security and GDPR Article 32 violation. The redaction formatting is inconsistent and only applied to a single field, making this document entirely unsuitable for release under GDPR's data protection principles.",
+  "processing_status": "completed"
+}

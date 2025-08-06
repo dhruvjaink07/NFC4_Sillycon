@@ -15,11 +15,14 @@ interface ProcessedFileData {
 }
 
 interface ProcessingData {
-  files: ProcessedFileData[]
+  files: ProcessedFileData[] // This should match what we're storing
+  originalFiles?: ProcessedFileData[]
+  processedFiles?: any[] // Keep this for backward compatibility
   fileCount: number
   totalSize: number
   complianceMode: string
   encryptionMethod: string
+  processedAt?: string
 }
 
 export default function ProcessPage() {
@@ -28,36 +31,98 @@ export default function ProcessPage() {
   const router = useRouter()
 
   useEffect(() => {
-    // Get data from sessionStorage
-    const storedData = sessionStorage.getItem('processingData')
-    
-    if (!storedData) {
-      console.error('No processing data found in sessionStorage')
-      // Redirect back to home if no data
-      router.push('/')
-      return
+    const loadProcessingData = async () => {
+      // Get data from sessionStorage
+      const storedData = sessionStorage.getItem('processingData')
+      
+      if (!storedData) {
+        console.error('No processing data found in sessionStorage')
+        router.push('/')
+        return
+      }
+
+      try {
+        const data: ProcessingData = JSON.parse(storedData)
+        
+        // Reconstruct File objects for PDFs
+        const fileObjectsData = sessionStorage.getItem('fileObjects')
+        if (fileObjectsData) {
+          const fileObjects = JSON.parse(fileObjectsData)
+          console.log('Found stored file objects:', fileObjects.length)
+          
+          // Create a map for quick lookup
+          const fileObjectMap = new Map()
+          
+          for (const fileData of fileObjects) {
+            try {
+              // Convert base64 back to File object
+              const binaryString = atob(fileData.base64Data)
+              const bytes = new Uint8Array(binaryString.length)
+              for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i)
+              }
+              
+              const file = new File([bytes], fileData.name, {
+                type: fileData.type,
+                lastModified: fileData.lastModified
+              })
+              
+              fileObjectMap.set(fileData.name, file)
+              console.log('Reconstructed file object for:', fileData.name)
+            } catch (error) {
+              console.error('Error reconstructing file object for', fileData.name, error)
+            }
+          }
+          
+          // Add File objects back to processedFiles
+          if (data.processedFiles) {
+            data.processedFiles = data.processedFiles.map(file => {
+              const fileObject = fileObjectMap.get(file.name)
+              if (fileObject) {
+                file.file = fileObject
+              }
+              return file
+            })
+          }
+        }
+
+        console.log('Loaded processing data:', {
+          fileCount: data.files?.length || 0,
+          hasFiles: !!data.files,
+          processedFilesWithObjects: data.processedFiles?.filter(f => f.file instanceof File).length || 0,
+          files: data.files?.map(f => ({ 
+            name: f.name, 
+            type: f.type, 
+            hasContent: !!f.content,
+            contentLength: f.content?.length || 0,
+            hasFileObject: f.hasFileObject
+          })) || []
+        })
+
+        // Ensure we have files data
+        if (!data.files && data.processedFiles) {
+          data.files = data.processedFiles.map(file => ({
+            name: file.name,
+            size: file.size,
+            type: file.type,
+            content: file.content || '',
+            lastModified: file.file?.lastModified || Date.now(),
+            hasFileObject: !!(file.file instanceof File)
+          }))
+        }
+        
+        setProcessingData(data)
+        setIsLoading(false)
+      } catch (error) {
+        console.error('Error parsing processing data:', error)
+        router.push('/')
+      }
     }
 
-    try {
-      const data: ProcessingData = JSON.parse(storedData)
-      console.log('Loaded processing data:', {
-        fileCount: data.files?.length || 0,
-        files: data.files?.map(f => ({ 
-          name: f.name, 
-          type: f.type, 
-          hasContent: !!f.content,
-          contentLength: f.content?.length || 0
-        })) || []
-      })
-      
-      setProcessingData(data)
-      setIsLoading(false)
-    } catch (error) {
-      console.error('Error parsing processing data:', error)
-      router.push('/')
-    }
+    loadProcessingData()
   }, [router])
 
+  // Add debugging before rendering
   if (isLoading) {
     return (
       <ThemeProvider>
@@ -76,17 +141,44 @@ export default function ProcessPage() {
     )
   }
 
-  if (!processingData || !processingData.files || processingData.files.length === 0) {
+  // Enhanced validation
+  if (!processingData) {
+    console.error('No processing data available')
     return (
       <ThemeProvider>
         <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50 dark:from-gray-900 dark:via-gray-800 dark:to-blue-900 flex items-center justify-center">
           <div className="text-center">
             <div className="text-6xl mb-4">❌</div>
             <h2 className="text-2xl font-bold text-gray-800 dark:text-white mb-2">
-              No Documents Found
+              No Processing Data Found
             </h2>
             <p className="text-gray-600 dark:text-gray-400 mb-4">
-              No processing data was found. Please upload documents first.
+              No processing data was found. Please upload and process documents first.
+            </p>
+            <button
+              onClick={() => router.push('/')}
+              className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              Go Back to Upload
+            </button>
+          </div>
+        </div>
+      </ThemeProvider>
+    )
+  }
+
+  if (!processingData.files || processingData.files.length === 0) {
+    console.error('No files in processing data:', processingData)
+    return (
+      <ThemeProvider>
+        <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50 dark:from-gray-900 dark:via-gray-800 dark:to-blue-900 flex items-center justify-center">
+          <div className="text-center">
+            <div className="text-6xl mb-4">📄</div>
+            <h2 className="text-2xl font-bold text-gray-800 dark:text-white mb-2">
+              No Documents to Display
+            </h2>
+            <p className="text-gray-600 dark:text-gray-400 mb-4">
+              No processed documents were found. Please upload and process documents first.
             </p>
             <button
               onClick={() => router.push('/')}
@@ -124,7 +216,7 @@ export default function ProcessPage() {
                 {processingData.files.length} document{processingData.files.length !== 1 ? 's' : ''} loaded
               </div>
               <div className="text-xs text-gray-500 dark:text-gray-500">
-                {processingData.complianceMode.toUpperCase()} • {processingData.encryptionMethod.toUpperCase()}
+                {processingData.complianceMode?.toString().toUpperCase()} • {processingData.encryptionMethod?.toUpperCase()}
               </div>
             </div>
           </div>
@@ -138,7 +230,19 @@ export default function ProcessPage() {
               </h2>
             </div>
             <PreviewCompo 
-              uploadedFiles={processingData.files}
+              uploadedFiles={processingData.files.map(file => {
+                // Find the corresponding processed file with File object
+                const processedFile = processingData.processedFiles?.find(pf => pf.name === file.name)
+                
+                return {
+                  name: file.name,
+                  size: file.size,
+                  type: file.type,
+                  content: file.content,
+                  lastModified: file.lastModified,
+                  file: processedFile?.file // This should now be a proper File object
+                }
+              })}
               className="w-full"
             />
           </div>

@@ -1,0 +1,19 @@
+{
+  "timestamp": "2025-08-06 04:38:12",
+  "file_path": "C:\\Users\\Jain\\AppData\\Local\\Temp\\tmp01xnkggi\\f146b268-4397-49b5-a730-cacd8a1e70da.json",
+  "file_size": 720,
+  "original_length": 693,
+  "redacted_length": 684,
+  "total_redacted_items": 1,
+  "redacted_items_by_type": {
+    "email": 1
+  },
+  "redacted_items": [
+    {
+      "type": "email",
+      "value_length": 25
+    }
+  ],
+  "compliance_notes": "The redaction is largely insufficient for GDPR compliance. Significant personal identifiable information, including the user's full name, username, password, user ID, access tokens (which contain the user ID), and recovery codes, remains unredacted. This leaves the data subject clearly identifiable, thus failing to meet GDPR's requirements for protecting personal data.",
+  "processing_status": "completed"
+}

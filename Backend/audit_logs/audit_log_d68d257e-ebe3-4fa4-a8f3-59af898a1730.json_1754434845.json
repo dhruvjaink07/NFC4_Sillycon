@@ -1,0 +1,19 @@
+{
+  "timestamp": "2025-08-06 04:30:45",
+  "file_path": "C:\\Users\\Jain\\AppData\\Local\\Temp\\tmpx52wdd30\\d68d257e-ebe3-4fa4-a8f3-59af898a1730.json",
+  "file_size": 720,
+  "original_length": 693,
+  "redacted_length": 684,
+  "total_redacted_items": 1,
+  "redacted_items_by_type": {
+    "email": 1
+  },
+  "redacted_items": [
+    {
+      "type": "email",
+      "value_length": 25
+    }
+  ],
+  "compliance_notes": "The redaction is **non-compliant** with GDPR standards. Significant Personally Identifiable Information (PII) such as the user's full name (\"Aarav Mehta\"), username (\"aaravm92\"), password, and recovery codes remain unredacted. Furthermore, the user ID is still present and embedded within the access token, meaning the individual remains identifiable.",
+  "processing_status": "completed"
+}

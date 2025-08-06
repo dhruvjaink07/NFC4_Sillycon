@@ -2,18 +2,18 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
-import mammoth from 'mammoth' // Add this import
 import { ThemeProvider } from "@/components/providers/theme-provider"
 import { motion, AnimatePresence } from "framer-motion"
-import { Shield, Upload, Settings, Zap, X, File, FileText, FileImage, Plus } from "lucide-react"
+import { Shield, Upload, Settings, Zap, X, File as FileIcon, FileText, FileImage, Plus } from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import JSZip from 'jszip'
 
 export default function DataPrivacyRedactionTool() {
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([])
   const [allowedFileType, setAllowedFileType] = useState<string | null>(null)
-  const [complianceMode, setComplianceMode] = useState("gdpr")
+  const [complianceMode, setComplianceMode] = useState("1")
   const [encryptionMethod, setEncryptionMethod] = useState("aes256")
   const [isProcessing, setIsProcessing] = useState(false)
   const router = useRouter()
@@ -50,27 +50,21 @@ export default function DataPrivacyRedactionTool() {
       const newFiles: File[] = []
       let currentAllowedType = allowedFileType
       
-      // If this is the first upload and no type is set, use the first file's type
       if (!currentAllowedType && files.length > 0) {
         currentAllowedType = getFileExtension(files[0].name)
       }
       
-      // Check all files before processing any
       const invalidFiles: string[] = []
       const validFiles: File[] = []
       
       for (const file of files) {
         const fileExtension = getFileExtension(file.name)
         
-        // If this is the very first file being uploaded (no allowed type set yet)
         if (!allowedFileType && validFiles.length === 0) {
-          // Set the allowed type based on first valid file
           currentAllowedType = fileExtension
           validFiles.push(file)
         } 
-        // Check if file matches the allowed type (either existing or from first file in this batch)
         else if (fileExtension === currentAllowedType) {
-          // Check if file already exists (by name and size)
           const fileExists = uploadedFiles.some(existingFile => 
             existingFile.name === file.name && existingFile.size === file.size
           )
@@ -79,13 +73,11 @@ export default function DataPrivacyRedactionTool() {
             validFiles.push(file)
           }
         } 
-        // If file type doesn't match, add to invalid list
         else {
           invalidFiles.push(`${file.name} (${fileExtension.toUpperCase()})`)
         }
       }
       
-      // If there are invalid files, reject the entire upload
       if (invalidFiles.length > 0) {
         const allowedTypeText = currentAllowedType ? currentAllowedType.toUpperCase() : 'the selected type'
         alert(`Invalid file types detected!\n\nOnly ${allowedTypeText} files are allowed.\n\nRejected files:\n${invalidFiles.join('\n')}\n\nPlease select only ${allowedTypeText} files or remove current files to upload a different type.`)
@@ -93,9 +85,7 @@ export default function DataPrivacyRedactionTool() {
         return
       }
       
-      // If all files are valid, process them
       if (validFiles.length > 0) {
-        // Set the allowed type if this is the first upload
         if (!allowedFileType) {
           setAllowedFileType(currentAllowedType)
         }
@@ -103,7 +93,7 @@ export default function DataPrivacyRedactionTool() {
         setUploadedFiles(prev => [...prev, ...validFiles])
       }
       
-      event.target.value = '' // Clear input
+      event.target.value = ''
     }
   }
 
@@ -111,7 +101,6 @@ export default function DataPrivacyRedactionTool() {
     const newFiles = uploadedFiles.filter((_, i) => i !== index)
     setUploadedFiles(newFiles)
     
-    // If no files left, reset allowed file type
     if (newFiles.length === 0) {
       setAllowedFileType(null)
     }
@@ -120,147 +109,115 @@ export default function DataPrivacyRedactionTool() {
   const handleRemoveAll = () => {
     setUploadedFiles([])
     setAllowedFileType(null)
-    // Clear the file input
     const fileInput = document.getElementById('file-input') as HTMLInputElement
     if (fileInput) {
       fileInput.value = ''
     }
   }
 
-  // Update the readFileAsText function to extract HTML structure:
+  // Update the readFileAsText function in page.tsx:
+
   const readFileAsText = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
       const fileType = getFileExtension(file.name)
       
-      // Handle .docx files with mammoth.js to preserve structure
+      // Handle .docx files with mammoth.js
       if (fileType === 'docx') {
-        const reader = new FileReader()
-        
-        reader.onload = async (e) => {
-          try {
-            const arrayBuffer = e.target?.result as ArrayBuffer
-            console.log('Processing DOCX file:', file.name, 'Size:', arrayBuffer.byteLength, 'bytes')
-            
-            // Extract HTML to preserve structure (tables, headings, etc.)
-            const htmlResult = await mammoth.convertToHtml({ arrayBuffer }, {
+        try {
+          console.log('Processing DOCX file with mammoth.js:', file.name, 'Size:', file.size, 'bytes')
+          
+          // Import mammoth dynamically
+          const mammoth = await import('mammoth')
+          
+          // Convert DOCX to HTML using mammoth
+          const arrayBuffer = await file.arrayBuffer()
+          const { value: htmlContent, messages } = await mammoth.convertToHtml({ 
+            arrayBuffer,
+            options: {
               styleMap: [
-                // Map Word styles to HTML/CSS
-                "p[style-name='Title'] => h1",
-                "p[style-name='Heading 1'] => h1",
-                "p[style-name='Heading 2'] => h2", 
-                "p[style-name='Heading 3'] => h3",
-                "p[style-name='Heading 4'] => h4",
+                "p[style-name='Heading 1'] => h1:fresh",
+                "p[style-name='Heading 2'] => h2:fresh", 
+                "p[style-name='Heading 3'] => h3:fresh",
+                "p[style-name='Title'] => h1.title:fresh",
+                "p[style-name='Subtitle'] => h2.subtitle:fresh",
                 "r[style-name='Strong'] => strong",
-                "r[style-name='Emphasis'] => em",
-                // Enhanced table mapping
-                "table => table.docx-table",
-                "tr => tr",
-                "td => td",
-                "th => th"
+                "r[style-name='Emphasis'] => em"
               ],
-              includeDefaultStyleMap: true,
-              includeEmbeddedStyleMap: true,
-              convertImage: mammoth.images.imgElement(function(image) {
-                // Convert images to base64 or placeholder
-                return image.read("base64").then(function(imageBuffer) {
-                  return {
-                    src: "data:" + image.contentType + ";base64," + imageBuffer
-                  }
-                })
-              })
-            })
+              includeDefaultStyleMap: true
+            }
+          })
+          
+          if (messages.length > 0) {
+            console.log('Mammoth conversion messages:', messages)
+          }
+          
+          if (htmlContent && htmlContent.trim()) {
+            // Extract plain text from HTML for text processing
+            const plainText = htmlContent
+              .replace(/<[^>]+>/g, ' ') // Remove HTML tags
+              .replace(/\s+/g, ' ') // Normalize whitespace
+              .replace(/&nbsp;/g, ' ') // Replace non-breaking spaces
+              .replace(/&amp;/g, '&') // Decode HTML entities
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .trim()
             
-            console.log('Mammoth HTML extraction result:', {
-              hasValue: !!htmlResult.value,
-              valueLength: htmlResult.value?.length || 0,
-              valuePreview: htmlResult.value?.substring(0, 300),
-              messagesCount: htmlResult.messages?.length || 0
-            })
-            
-            if (htmlResult.value && htmlResult.value.trim()) {
-              console.log('Successfully extracted structured HTML from DOCX:', file.name)
-              
-              // Create a structured content object
-              const structuredContent = {
-                type: 'html',
-                content: htmlResult.value,
-                hasStructure: true
-              }
-              
-              console.log('Resolving with HTML content:', JSON.stringify(structuredContent).substring(0, 200))
-              resolve(JSON.stringify(structuredContent))
-            } else {
-              console.warn('HTML extraction returned empty result, trying raw text extraction')
-              
-              // Fallback to raw text if HTML extraction fails
-              const textResult = await mammoth.extractRawText({ arrayBuffer })
-              console.log('Raw text extraction result:', {
-                hasValue: !!textResult.value,
-                valueLength: textResult.value?.length || 0,
-                valuePreview: textResult.value?.substring(0, 300)
-              })
-              
-              if (textResult.value && textResult.value.trim()) {
-                const structuredContent = {
-                  type: 'text',
-                  content: textResult.value,
-                  hasStructure: false
-                }
-                console.log('Resolving with text content:', textResult.value.substring(0, 100))
-                resolve(JSON.stringify(structuredContent))
-              } else {
-                console.error('Both HTML and text extraction failed for:', file.name)
-                resolve(JSON.stringify({
-                  type: 'error',
-                  content: `DOCX Document: ${file.name}
-File Size: ${(file.size / 1024).toFixed(2)} KB
-Status: Content extraction failed
-
-Possible reasons:
-- Document contains only images or graphics
-- Document is password protected
-- Document has complex formatting that couldn't be extracted
-- Document file may be corrupted
-
-The document was uploaded successfully but no readable content was found.`,
-                  hasStructure: false
-                }))
-              }
+            const structuredContent = {
+              type: 'html',
+              content: plainText, // Plain text for processing
+              htmlContent: htmlContent, // HTML for display
+              textContent: plainText, // Text version
+              hasStructure: true,
+              fileName: file.name,
+              fileSize: file.size,
+              wordCount: plainText.split(/\s+/).length,
+              processingMethod: 'mammoth.js'
             }
             
-            // Log any warnings from mammoth
-            if (htmlResult.messages && htmlResult.messages.length > 0) {
-              console.warn('Mammoth conversion warnings:', htmlResult.messages)
-            }
-          } catch (error) {
-            console.error('Error extracting DOCX content:', error)
-            resolve(JSON.stringify({
-              type: 'error',
-              content: `Error extracting content from DOCX file: ${file.name}
+            console.log('Successfully processed DOCX with mammoth.js:', {
+              htmlLength: htmlContent.length,
+              textLength: plainText.length,
+              wordCount: structuredContent.wordCount
+            })
+            
+            resolve(JSON.stringify(structuredContent))
+          } else {
+            throw new Error('Mammoth conversion returned empty content')
+          }
+          
+        } catch (error) {
+          console.error('Error processing DOCX with mammoth.js:', error)
+          resolve(JSON.stringify({
+            type: 'error',
+            content: `Error processing DOCX file: ${file.name}
 Error Details: ${(error as Error).message}
 File Size: ${(file.size / 1024).toFixed(2)} KB
 
-This might happen if:
-- The file is corrupted
-- The file uses unsupported DOCX features
-- The file is password protected
-- There are permission issues
+Processing Method: mammoth.js
+Error Type: ${error.constructor.name}
 
-Please try re-uploading the file or use a different format.`,
-              hasStructure: false
-            }))
-          }
+This might happen if:
+- The file is corrupted or incomplete
+- The file uses unsupported DOCX features  
+- The file is password protected
+- There are memory/processing limitations
+
+Troubleshooting:
+1. Verify the file opens correctly in Microsoft Word
+2. Try saving as a new .docx file
+3. Remove any complex formatting or embedded objects
+4. Ensure the file is not password protected
+5. Try converting to .txt format first`,
+            hasStructure: false,
+            fileName: file.name,
+            fileSize: file.size,
+            processingMethod: 'mammoth.js-error'
+          }))
         }
-        
-        reader.onerror = () => {
-          console.error('FileReader error for DOCX file:', file.name)
-          reject(new Error("Failed to read DOCX file"))
-        }
-        
-        // Read as ArrayBuffer for mammoth.js
-        reader.readAsArrayBuffer(file)
       }
-      // Handle legacy .doc files (mammoth doesn't support these)
+      // Handle legacy .doc files
       else if (fileType === 'doc') {
         resolve(JSON.stringify({
           type: 'text',
@@ -271,36 +228,32 @@ Last Modified: ${new Date(file.lastModified).toLocaleString()}
 Status: Successfully uploaded
 
 ⚠️ Important Note:
-Legacy .DOC files use an older binary format that requires specialized server-side processing.
+Legacy .DOC files require server-side processing.
+Mammoth.js only supports .DOCX files.
 
-Mammoth.js (used for .DOCX files) does not support .DOC files.
-
-For .DOC file processing, you would need:
-- Server-side libraries like: antiword, textract, unoconv, or LibreOffice
-- Cloud services like: Microsoft Graph API, Google Docs API
-- Or convert the file to .DOCX format first
-
-Recommendation: Please save this file as .DOCX format in Microsoft Word and re-upload for better text extraction.`,
-          hasStructure: false
+Recommendation: Please save this file as .DOCX format in Microsoft Word and re-upload.`,
+          hasStructure: false,
+          fileName: file.name,
+          fileSize: file.size
         }))
       }
       // Handle PDF files
       else if (fileType === 'pdf') {
         resolve(JSON.stringify({
-          type: 'text',
+          type: 'pdf',
           content: `PDF Document: ${file.name}
 File Size: ${(file.size / 1024).toFixed(2)} KB
 Last Modified: ${new Date(file.lastModified).toLocaleString()}
 Status: Successfully uploaded
 
 📄 PDF Processing Note:
-PDF text extraction requires specialized libraries such as:
-- Client-side: PDF.js, pdf-lib
-- Server-side: pdf-parse, PDFtk, Apache PDFBox
-- Cloud APIs: Adobe PDF Services, Google Cloud Document AI
+PDF files will be processed using PDF.js for rendering and text extraction.
 
-The PDF file has been uploaded successfully and is ready for server-side processing.`,
-          hasStructure: false
+The PDF file has been uploaded successfully and is ready for server-side processing.
+Text extraction and redaction will be handled by the backend processing pipeline.`,
+          hasStructure: false,
+          fileName: file.name,
+          fileSize: file.size
         }))
       }
       else {
@@ -312,7 +265,9 @@ The PDF file has been uploaded successfully and is ready for server-side process
           resolve(JSON.stringify({
             type: 'text',
             content: result,
-            hasStructure: false
+            hasStructure: false,
+            fileName: file.name,
+            fileSize: file.size
           }))
         }
         
@@ -320,77 +275,403 @@ The PDF file has been uploaded successfully and is ready for server-side process
           reject(new Error(`Failed to read ${fileType.toUpperCase()} file`))
         }
         
-        // Read as text with UTF-8 encoding
         reader.readAsText(file, 'UTF-8')
       }
     })
   }
 
-  const handleProcess = () => {
+  const handleProcess = async () => {
     if (uploadedFiles.length === 0) {
       alert('Please upload at least one file first')
       return
     }
 
-    // Show processing state immediately
     setIsProcessing(true)
 
-    // Convert File objects to a format we can store and reconstruct
-    const filePromises = uploadedFiles.map(async (file, index) => {
-      try {
-        console.log(`Processing file ${index + 1}/${uploadedFiles.length}: ${file.name}`)
-        const content = await readFileAsText(file)
-        
-        return {
-          name: file.name,
-          size: file.size,
-          type: getFileExtension(file.name),
-          content: content, // Store the actual file content
-          lastModified: file.lastModified
-        }
-      } catch (error) {
-        console.error(`Error processing file ${file.name}:`, error)
-        
-        // Return error information instead of failing completely
-        return {
-          name: file.name,
-          size: file.size,
-          type: getFileExtension(file.name),
-          content: `Error processing file: ${file.name}
-Error: ${(error as Error).message}
-File Size: ${(file.size / 1024).toFixed(2)} KB
+    try {
+      const isSingleFile = uploadedFiles.length === 1
+      const apiUrl = isSingleFile 
+        ? "https://mfktdwch-8000.inc1.devtunnels.ms/redact/single"
+        : "https://mfktdwch-8000.inc1.devtunnels.ms/redact/multiple"
 
-The file could not be processed. Please try:
-1. Re-uploading the file
-2. Checking if the file is corrupted
-3. Converting to a different format if possible`,
-          lastModified: file.lastModified
-        }
+      const formData = new FormData()
+
+      if (isSingleFile) {
+        formData.append('file', uploadedFiles[0])
+        console.log('Single file details:', {
+          name: uploadedFiles[0].name,
+          size: uploadedFiles[0].size,
+          type: uploadedFiles[0].type,
+          lastModified: uploadedFiles[0].lastModified
+        })
+      } else {
+        uploadedFiles.forEach((file, index) => {
+          formData.append('files', file)
+          console.log(`File ${index} details:`, {
+            name: file.name,
+            size: file.size,
+            type: file.type,
+            lastModified: file.lastModified
+          })
+        })
       }
-    })
 
-    Promise.all(filePromises).then((filesWithContent) => {
-      // Store processing data with file content
+      formData.append('complianceNum', complianceMode)
+
+      console.log(`Calling ${isSingleFile ? 'single' : 'multiple'} file API:`, apiUrl)
+      console.log('Files count:', uploadedFiles.length)
+      console.log('Compliance mode:', complianceMode, 'type:', typeof complianceMode)
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        body: formData,
+      })
+
+      console.log('Response status:', response.status)
+      console.log('Response statusText:', response.statusText)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error('API Error Response:', errorText)
+        throw new Error(`API call failed: ${response.status} ${response.statusText}. Details: ${errorText}`)
+      }
+
+      const contentType = response.headers.get('content-type')
+      console.log('Response content type:', contentType)
+
+      let processedFiles = []
+
+      try {
+        if (contentType && contentType.includes('application/zip')) {
+          console.log('Processing zip response')
+          const zipBlob = await response.blob()
+          console.log('Received zip blob, size:', zipBlob.size)
+          processedFiles = await extractFilesFromZip(zipBlob)
+        } else if (contentType && contentType.includes('application/json')) {
+          console.log('Processing JSON response')
+          const jsonData = await response.json()
+          processedFiles = await convertJsonToFiles(jsonData)
+        } else {
+          console.log('Processing unknown response type, attempting JSON parse')
+          const responseText = await response.text()
+          console.log('Raw response text length:', responseText.length)
+          console.log('Raw response preview:', responseText.substring(0, 200))
+          
+          try {
+            const jsonData = JSON.parse(responseText)
+            processedFiles = await convertJsonToFiles(jsonData)
+          } catch (parseError) {
+            console.error('Failed to parse response as JSON:', parseError)
+            processedFiles = [{
+              name: 'response.txt',
+              content: responseText,
+              size: responseText.length,
+              type: 'txt',
+              isProcessed: true
+            }]
+          }
+        }
+      } catch (processingError) {
+        console.error('Error processing response:', processingError)
+        throw new Error(`Failed to process server response: ${(processingError as Error).message}`)
+      }
+
+      console.log('Processed files:', processedFiles)
+
       const processingData = {
-        files: filesWithContent,
+        files: processedFiles.map(file => ({
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          content: file.content,
+          lastModified: file.file?.lastModified || Date.now(),
+          hasFileObject: !!(file.file instanceof File)
+        })),
+        originalFiles: uploadedFiles.map(file => ({
+          name: file.name,
+          size: file.size,
+          type: getFileExtension(file.name),
+          lastModified: file.lastModified
+        })),
+        processedFiles: processedFiles.map(file => ({
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          content: file.content,
+          isProcessed: true,
+          fileData: file.file instanceof File ? null : null,
+          lastModified: file.file?.lastModified || Date.now()
+        })),
         fileCount: uploadedFiles.length,
         totalSize: uploadedFiles.reduce((sum, file) => sum + file.size, 0),
         complianceMode,
-        encryptionMethod
+        encryptionMethod,
+        processedAt: new Date().toISOString()
       }
+
+      console.log('About to store processing data:')
+      console.log('Processed files structure:', processedFiles.map(f => ({
+        name: f.name,
+        hasFile: !!(f.file instanceof File),
+        fileType: f.file?.constructor.name,
+        fileSize: f.file?.size,
+        contentLength: f.content?.length
+      })))
 
       sessionStorage.setItem('processingData', JSON.stringify(processingData))
 
-      // Navigate to process page after a delay
+      const storeFileObjects = async () => {
+        const filePromises = processedFiles.map(async (file, index) => {
+          if (file.file instanceof File) {
+            try {
+              const arrayBuffer = await file.file.arrayBuffer()
+              const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))
+              
+              return {
+                name: file.name,
+                base64Data: base64,
+                type: file.file.type,
+                size: file.file.size,
+                lastModified: file.file.lastModified
+              }
+            } catch (error) {
+              console.error('Error converting file to base64:', error)
+              return null
+            }
+          }
+          return null
+        })
+
+        const fileDataArray = await Promise.all(filePromises)
+        const validFileData = fileDataArray.filter(data => data !== null)
+        
+        if (validFileData.length > 0) {
+          sessionStorage.setItem('fileObjects', JSON.stringify(validFileData))
+        }
+      }
+
+      await storeFileObjects()
+
       setTimeout(() => {
         setIsProcessing(false)
         router.push('/process')
-      }, 3000) // Reduced to 3 seconds since we're actually processing files now
-    }).catch((error) => {
-      console.error('Error reading files:', error)
+      }, 1500)
+
+    } catch (error) {
+      console.error('Error processing files:', error)
       setIsProcessing(false)
-      alert(`Error processing files: ${error.message}\n\nPlease try uploading the files again.`)
-    })
+      
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
+      alert(`Error processing files: ${errorMessage}\n\nPlease check your connection and try again.`)
+    }
+  }
+
+  // Helper function to extract files from zip blob - FIXED
+  const extractFilesFromZip = async (zipBlob: Blob): Promise<any[]> => {
+    try {
+      console.log('Extracting files from zip blob, size:', zipBlob.size)
+      
+      const zip = new JSZip()
+      const loadedZip = await zip.loadAsync(zipBlob)
+      const files = []
+
+      console.log('Zip loaded successfully, files found:', Object.keys(loadedZip.files).length)
+
+      for (const [filename, file] of Object.entries(loadedZip.files)) {
+        if (!file.dir) {
+          console.log('Processing file from zip:', filename)
+          
+          try {
+            const content = await file.async('blob')
+            
+            const processedFile = new window.File([content], filename, {
+              type: getFileTypeFromExtension(filename),
+              lastModified: Date.now()
+            })
+            
+            files.push({
+              name: filename,
+              file: processedFile,
+              size: content.size,
+              type: getFileExtension(filename),
+              isProcessed: true,
+              content: await file.async('text')
+            })
+            
+            console.log('Successfully processed file:', filename, 'size:', content.size)
+          } catch (fileError) {
+            console.error('Error processing individual file:', filename, fileError)
+          }
+        }
+      }
+
+      console.log('Successfully extracted', files.length, 'files from zip')
+      return files
+    } catch (error) {
+      console.error('Error extracting zip file:', error)
+      throw new Error(`Failed to extract files from zip: ${(error as Error).message}`)
+    }
+  }
+
+  // Helper function to convert JSON data to files
+  const convertJsonToFiles = async (jsonData: any): Promise<any[]> => {
+    try {
+      console.log('Converting JSON data to files:', jsonData)
+      const files = []
+
+      if (jsonData.files && Array.isArray(jsonData.files)) {
+        console.log('Processing multiple files from JSON')
+        for (const fileData of jsonData.files) {
+          const file = await createFileFromData(fileData)
+          files.push(file)
+        }
+      } else if (jsonData.content || jsonData.file_content || jsonData.redacted_content) {
+        console.log('Processing single file from JSON')
+        const file = await createFileFromData(jsonData)
+        files.push(file)
+      } else if (jsonData.redacted_files && Array.isArray(jsonData.redacted_files)) {
+        console.log('Processing redacted files from JSON')
+        for (const fileData of jsonData.redacted_files) {
+          const file = await createFileFromData(fileData)
+          files.push(file)
+        }
+      } else if (jsonData.result && Array.isArray(jsonData.result)) {
+        console.log('Processing result array from JSON')
+        for (const fileData of jsonData.result) {
+          const file = await createFileFromData(fileData)
+          files.push(file)
+        }
+      } else {
+        console.log('Unknown JSON structure, treating as single file')
+        const file = await createFileFromData({
+          filename: 'response.json',
+          content: JSON.stringify(jsonData, null, 2),
+          type: 'json'
+        })
+        files.push(file)
+      }
+
+      console.log('Successfully converted JSON to', files.length, 'files')
+      return files
+    } catch (error) {
+      console.error('Error converting JSON to files:', error)
+      throw new Error(`Failed to convert JSON data to files: ${(error as Error).message}`)
+    }
+  }
+
+  // Helper function to create a File object from data - FIXED
+  const createFileFromData = async (fileData: any): Promise<any> => {
+    try {
+      let content = fileData.content || fileData.file_content || fileData.redacted_content || fileData.data
+      let filename = fileData.filename || fileData.name || fileData.file_name || 'processed_file.txt'
+      
+      console.log('Creating file from data:', { filename, hasContent: !!content, contentType: typeof content })
+
+      let fileBlob: Blob
+      let textContent = ''
+
+      if (fileData.encoding === 'base64' || (typeof content === 'string' && content.includes('base64'))) {
+        console.log('Processing base64 content for:', filename)
+        const base64Data = content.replace(/^data:.*;base64,/, '')
+        try {
+          const binaryString = atob(base64Data)
+          const bytes = new Uint8Array(binaryString.length)
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i)
+          }
+          
+          const mimeType = filename.toLowerCase().endsWith('.pdf') 
+            ? 'application/pdf' 
+            : getFileTypeFromExtension(filename)
+          
+          fileBlob = new Blob([bytes], { type: mimeType })
+          
+          if (filename.toLowerCase().endsWith('.pdf')) {
+            textContent = 'PDF content - use PDF preview mode to view the document'
+          } else {
+            try {
+              textContent = new TextDecoder().decode(bytes)
+            } catch (decodeError) {
+              textContent = 'Binary content - preview not available'
+            }
+          }
+        } catch (base64Error) {
+          console.error('Error decoding base64:', base64Error)
+          fileBlob = new Blob([content], { type: 'text/plain' })
+          textContent = content
+        }
+      } else if (typeof content === 'object' && content !== null) {
+        console.log('Processing object content for:', filename)
+        const jsonContent = JSON.stringify(content, null, 2)
+        fileBlob = new Blob([jsonContent], { type: 'application/json' })
+        textContent = jsonContent
+        if (!filename.endsWith('.json')) {
+          filename = filename.replace(/\.[^/.]+$/, '') + '.json'
+        }
+      } else if (typeof content === 'string') {
+        console.log('Processing string content for:', filename)
+        if (filename.toLowerCase().endsWith('.pdf')) {
+          fileBlob = new Blob([content], { type: 'text/plain' })
+          textContent = content
+        } else {
+          fileBlob = new Blob([content], { type: 'text/plain' })
+          textContent = content
+        }
+      } else if (content instanceof Blob) {
+        console.log('Content is already a Blob for:', filename)
+        fileBlob = content
+        try {
+          textContent = await content.text()
+        } catch (textError) {
+          textContent = 'Binary content - preview not available'
+        }
+      } else {
+        console.log('Unknown content type, using fallback for:', filename)
+        const fallbackContent = String(content || 'No content available')
+        fileBlob = new Blob([fallbackContent], { type: 'text/plain' })
+        textContent = fallbackContent
+      }
+
+      const file = new window.File([fileBlob], filename, {
+        type: fileBlob.type,
+        lastModified: Date.now()
+      })
+
+      const result = {
+        name: filename,
+        file: file,
+        size: file.size,
+        type: getFileExtension(filename),
+        isProcessed: true,
+        content: textContent,
+        originalData: fileData
+      }
+
+      console.log('Successfully created file:', result.name, 'size:', result.size, 'type:', file.type)
+      return result
+    } catch (error) {
+      console.error('Error creating file from data:', error)
+      throw new Error(`Failed to create file: ${(error as Error).message}`)
+    }
+  }
+
+  // Helper function to get MIME type from file extension
+  const getFileTypeFromExtension = (filename: string): string => {
+    const extension = getFileExtension(filename)
+    const mimeTypes: { [key: string]: string } = {
+      'txt': 'text/plain',
+      'json': 'application/json',
+      'csv': 'text/csv',
+      'xml': 'application/xml',
+      'html': 'text/html',
+      'pdf': 'application/pdf',
+      'doc': 'application/msword',
+      'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'png': 'image/png',
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg'
+    }
+    return mimeTypes[extension] || 'application/octet-stream'
   }
 
   const getTotalSize = () => {
@@ -406,10 +687,9 @@ The file could not be processed. Please try:
   }
 
   const complianceOptions = [
-    { value: "gdpr", label: "GDPR", desc: "General Data Protection Regulation (EU)" },
-    { value: "hipaa", label: "HIPAA", desc: "Health Insurance Portability Act (US)" },
-    { value: "dpdp", label: "DPDP", desc: "Digital Personal Data Protection (India)" },
-    { value: "ccpa", label: "CCPA", desc: "California Consumer Privacy Act" }
+    { value: 1, label: "GDPR", desc: "General Data Protection Regulation (EU)" },
+    { value: 2, label: "HIPAA", desc: "Health Insurance Portability Act (US)" },
+    { value: 3, label: "DPDP", desc: "Digital Personal Data Protection (India)" },
   ]
 
   const encryptionOptions = [

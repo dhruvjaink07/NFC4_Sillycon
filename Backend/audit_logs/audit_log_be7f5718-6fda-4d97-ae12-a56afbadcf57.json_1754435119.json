@@ -1,0 +1,19 @@
+{
+  "timestamp": "2025-08-06 04:35:19",
+  "file_path": "C:\\Users\\Jain\\AppData\\Local\\Temp\\tmp2o90lah5\\be7f5718-6fda-4d97-ae12-a56afbadcf57.json",
+  "file_size": 720,
+  "original_length": 693,
+  "redacted_length": 684,
+  "total_redacted_items": 1,
+  "redacted_items_by_type": {
+    "email": 1
+  },
+  "redacted_items": [
+    {
+      "type": "email",
+      "value_length": 25
+    }
+  ],
+  "compliance_notes": "The provided text exhibits significant GDPR compliance issues. The user's full name (\"Aarav Mehta\") and username (\"aaravm92\") are unredacted, which are clear personal identifiable information (PII). Furthermore, the user's password is exposed, representing a severe security and data protection risk, directly violating GDPR principles of security of processing. This redaction is incomplete and does not comply with GDPR standards for protecting personal data.",
+  "processing_status": "completed"
+}

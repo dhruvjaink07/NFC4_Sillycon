@@ -1,959 +1,2435 @@
 "use client"
 
-import React, { useState, useEffect } from 'react'
-import { motion } from 'framer-motion'
+import React, { useState, useCallback, useEffect, useRef } from 'react'
+import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Download, FileText, Eye, ChevronDown, Edit3, Save, Undo } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { FileText, Eye, EyeOff, Copy, AlertCircle } from 'lucide-react'
+import * as pdfjsLib from 'pdfjs-dist'
+import mammoth from 'mammoth'
 
-// Add the missing interface
-interface StructuredContent {
-  type: 'html' | 'text' | 'error'
-  content: string
-  hasStructure: boolean
+// Configure PDF.js worker
+if (typeof window !== 'undefined') {
+  try {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+      'pdfjs-dist/build/pdf.worker.min.js',
+      import.meta.url
+    ).toString()
+  } catch (error) {
+    console.log('Fallback to CDN worker due to:', error)
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  }
 }
 
-interface ProcessedFile {
+interface RedactionArea {
   id: string
-  name: string
-  type: string
-  title: string
-  content: string
-  rawJsonContent?: any
-  redactedContent: Array<{
-    type: "paragraph" | "redacted"
-    text: string
-    originalText?: string
-    category?: string
-  }>
-  redactionStats: {
-    totalRedactions: number
-    categories: Record<string, number>
-  }
-  isLoading: boolean
-  error?: string
+  x: number
+  y: number
+  width: number
+  height: number
+  page: number
+  text?: string
 }
 
-interface PreviewCompoProps {
-  className?: string
-  uploadedFiles: Array<{
-    name: string
-    size: number
-    type: string
-    content?: string
-    lastModified?: number
-  }>
-}
+// Enhanced PDF Viewer with Text Selection and Redaction
+const PDFViewer: React.FC<{ file: any, fileName: string }> = ({ file, fileName }) => {
+  const [pdf, setPdf] = useState<any>(null)
+  const [currentPage, setCurrentPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(0)
+  const [scale, setScale] = useState(1.5)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string>('')
+  const [redactionMode, setRedactionMode] = useState(false)
+  const [manualRedactionMode, setManualRedactionMode] = useState(false);
+  const [redactionAreas, setRedactionAreas] = useState<RedactionArea[]>([])
+  const [isSelecting, setIsSelecting] = useState(false)
+  const [selectionStart, setSelectionStart] = useState<{ x: number, y: number } | null>(null)
+  const [currentSelection, setCurrentSelection] = useState<RedactionArea | null>(null)
+  const [textItems, setTextItems] = useState<any[]>([])
+  const [selectedTextItems, setSelectedTextItems] = useState<Set<number>>(new Set())
+  const [isRendering, setIsRendering] = useState(false)
+  const [redactedTextContent, setRedactedTextContent] = useState<string | null>(null);
 
-// Add the sanitizeHtml function
-const sanitizeHtml = (html: string): string => {
-  // Basic HTML sanitization to prevent XSS
-  // In production, you should use a library like DOMPurify
-  return html
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/javascript:/gi, '')
-    .replace(/on\w+="[^"]*"/gi, '')
-    .replace(/on\w+='[^']*'/gi, '')
-    .replace(/on\w+=\w+/gi, '')
-}
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const textLayerRef = useRef<HTMLDivElement>(null)
+  const overlayRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const renderTaskRef = useRef<any>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
-export function PreviewCompo({ className, uploadedFiles }: PreviewCompoProps) {
-  const [showRedactions, setShowRedactions] = useState(false)
-  const [zoom, setZoom] = useState(100)
-  const [activeFileId, setActiveFileId] = useState("")
-  const [processedFiles, setProcessedFiles] = useState<ProcessedFile[]>([])
-
-  // Move the getFileTypeFromName function outside and make it available throughout the component
-  const getFileTypeFromName = (filename: string): string => {
-    const extension = filename.split('.').pop()?.toLowerCase() || ''
-    return extension
-  }
-
-  // Render content based on file type with proper formatting
-  const renderFileContent = (file: ProcessedFile) => {
-    if (file.type === 'json') {
-      if (file.rawJsonContent) {
-        // Show formatted JSON
-        return (
-          <pre className="text-sm font-mono whitespace-pre-wrap break-words bg-gray-100 dark:bg-gray-800 p-4 rounded-lg overflow-auto">
-            {JSON.stringify(file.rawJsonContent, null, 2)}
-          </pre>
-        )
-      } else {
-        // Show raw JSON content as text
-        return (
-          <pre className="text-sm font-mono whitespace-pre-wrap break-words bg-gray-100 dark:bg-gray-800 p-4 rounded-lg overflow-auto">
-            {file.content}
-          </pre>
-        )
-      }
-    } else if (file.type === 'txt' || file.type === 'csv' || file.type === 'xml') {
-      // Parse structured content if available
-      let parsedContent: StructuredContent | null = null
-      try {
-        parsedContent = JSON.parse(file.content)
-      } catch (e) {
-        // If parsing fails, treat as plain text
-      }
-
-      if (parsedContent && parsedContent.type) {
-        return (
-          <div className="bg-gray-50 dark:bg-gray-900 border rounded-lg p-4 overflow-auto">
-            <pre className="text-sm whitespace-pre-wrap break-words text-gray-800 dark:text-gray-200 font-mono">
-              {parsedContent.content}
-            </pre>
-          </div>
-        )
-      } else {
-        // Show text-based files with original formatting preserved
-        return (
-          <div className="bg-gray-50 dark:bg-gray-900 border rounded-lg p-4 overflow-auto">
-            <pre className="text-sm whitespace-pre-wrap break-words text-gray-800 dark:text-gray-200 font-mono">
-              {file.content}
-            </pre>
-          </div>
-        )
-      }
-    } else if (file.type === 'docx') {
-      // Parse structured content from DOCX
-      let parsedContent: StructuredContent | null = null
-      
-      console.log('Raw file content for DOCX:', file.content?.substring(0, 200)) // Debug log
-      
-      try {
-        parsedContent = JSON.parse(file.content)
-        console.log('Successfully parsed DOCX content:', parsedContent) // Debug log
-      } catch (e) {
-        console.error('Failed to parse DOCX content as JSON:', e) // Debug log
-        console.log('Treating as plain text content') // Debug log
-        // If parsing fails, treat as plain text
-        parsedContent = { type: 'text', content: file.content, hasStructure: false }
-      }
-
-      // Check if we have any content at all
-      if (!file.content || file.content.trim().length === 0) {
-        console.error('No content available for DOCX file:', file.name)
-        return (
-          <div className="bg-white dark:bg-gray-800 border rounded-lg p-6 overflow-auto">
-            <div className="text-center p-8">
-              <div className="text-6xl mb-4">📝</div>
-              <h3 className="text-xl font-semibold text-gray-800 dark:text-gray-200 mb-2">
-                Microsoft Word Document
-              </h3>
-              <p className="text-gray-600 dark:text-gray-400 mb-4">
-                {file.name}
-              </p>
-              
-              <div className="bg-red-50 dark:bg-red-900/20 rounded-lg p-4 mb-6">
-                <div className="flex items-center justify-center mb-3">
-                  <div className="w-3 h-3 bg-red-500 rounded-full mr-2"></div>
-                  <span className="text-red-800 dark:text-red-200 font-medium">No Content Available</span>
-                </div>
-                <div className="text-sm text-red-700 dark:text-red-300 text-left">
-                  <p>The document appears to be empty or the content could not be extracted.</p>
-                  <p className="mt-2">Please try re-uploading the file or check if the document contains readable text.</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        )
-      }
-
-      // Check if we have structured HTML content
-      if (parsedContent && parsedContent.type === 'html' && parsedContent.hasStructure && parsedContent.content && parsedContent.content.trim()) {
-        console.log('Rendering HTML content for DOCX, content length:', parsedContent.content.length) // Debug log
-        
-        // Render structured HTML content
-        return (
-          <div className="bg-white dark:bg-gray-800 border rounded-lg overflow-hidden">
-            
-            
-            {/* Document content with styling */}
-            <div className="p-6 max-h-96 overflow-auto">
-              <div 
-                className="docx-content"
-                dangerouslySetInnerHTML={{ 
-                  __html: sanitizeHtml(parsedContent.content) 
-                }}
-                style={{
-                  fontFamily: 'system-ui, -apple-system, sans-serif',
-                  lineHeight: '1.6',
-                  color: '#374151'
-                }}
-              />
-            </div>
-            
-            {/* Global CSS styles for DOCX content */}
-            <style jsx global>{`
-              .docx-content {
-                color: #374151;
-              }
-              
-              .docx-content h1 {
-                font-size: 1.75rem !important;
-                font-weight: 700 !important;
-                margin: 1.5rem 0 1rem 0 !important;
-                color: #1f2937 !important;
-                border-bottom: 2px solid #e5e7eb !important;
-                padding-bottom: 0.5rem !important;
-              }
-              
-              .docx-content h2 {
-                font-size: 1.5rem !important;
-                font-weight: 600 !important;
-                margin: 1.25rem 0 0.75rem 0 !important;
-                color: #374151 !important;
-              }
-              
-              .docx-content h3 {
-                font-size: 1.25rem !important;
-                font-weight: 600 !important;
-                margin: 1rem 0 0.5rem 0 !important;
-                color: #4b5563 !important;
-              }
-              
-              .docx-content h4 {
-                font-size: 1.125rem !important;
-                font-weight: 600 !important;
-                margin: 0.75rem 0 0.5rem 0 !important;
-                color: #6b7280 !important;
-              }
-              
-              /* Enhanced table styling with !important to override any other styles */
-              .docx-content table {
-                width: 100% !important;
-                border-collapse: collapse !important;
-                margin: 1.5rem 0 !important;
-                background: white !important;
-                box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06) !important;
-                border-radius: 0.5rem !important;
-                overflow: hidden !important;
-                border: 2px solid #d1d5db !important;
-              }
-              
-              .docx-content table th {
-                background-color: #f9fafb !important;
-                padding: 0.875rem 1rem !important;
-                text-align: left !important;
-                font-weight: 600 !important;
-                color: #374151 !important;
-                border-bottom: 2px solid #e5e7eb !important;
-                border-right: 1px solid #e5e7eb !important;
-                font-size: 0.875rem !important;
-                text-transform: uppercase !important;
-                letter-spacing: 0.05em !important;
-              }
-              
-              .docx-content table th:last-child {
-                border-right: none !important;
-              }
-              
-              .docx-content table td {
-                padding: 0.875rem 1rem !important;
-                border-bottom: 1px solid #e5e7eb !important;
-                border-right: 1px solid #e5e7eb !important;
-                color: #4b5563 !important;
-                vertical-align: top !important;
-                line-height: 1.5 !important;
-              }
-              
-              .docx-content table td:last-child {
-                border-right: none !important;
-              }
-              
-              .docx-content table tr:nth-child(even) td {
-                background-color: #f9fafb !important;
-              }
-              
-              .docx-content table tr:hover td {
-                background-color: #f3f4f6 !important;
-              }
-              
-              .docx-content table tr:last-child td {
-                border-bottom: none !important;
-              }
-              
-              .docx-content p {
-                margin: 0.75rem 0 !important;
-                line-height: 1.7 !important;
-                color: #374151 !important;
-              }
-              
-              .docx-content ul, .docx-content ol {
-                margin: 0.75rem 0 !important;
-                padding-left: 1.5rem !important;
-              }
-              
-              .docx-content li {
-                margin: 0.25rem 0 !important;
-                line-height: 1.6 !important;
-              }
-              
-              .docx-content strong {
-                font-weight: 600 !important;
-                color: #1f2937 !important;
-              }
-              
-              .docx-content em {
-                font-style: italic !important;
-                color: #4b5563 !important;
-              }
-              
-              .docx-content img {
-                max-width: 100% !important;
-                height: auto !important;
-                margin: 1rem 0 !important;
-                border-radius: 0.25rem !important;
-                box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1) !important;
-              }
-              
-              /* Dark mode styles */
-              .dark .docx-content {
-                color: #e5e7eb !important;
-              }
-              
-              .dark .docx-content h1 {
-                color: #f9fafb !important;
-                border-bottom-color: #374151 !important;
-              }
-              
-              .dark .docx-content h2 {
-                color: #e5e7eb !important;
-              }
-              
-              .dark .docx-content h3 {
-                color: #d1d5db !important;
-              }
-              
-              .dark .docx-content h4 {
-                color: #9ca3af !important;
-              }
-              
-              .dark .docx-content p {
-                color: #d1d5db !important;
-              }
-              
-              .dark .docx-content table {
-                background: #1f2937 !important;
-                border-color: #374151 !important;
-              }
-              
-              .dark .docx-content table th {
-                background-color: #374151 !important;
-                color: #f9fafb !important;
-                border-bottom-color: #4b5563 !important;
-                border-right-color: #4b5563 !important;
-              }
-              
-              .dark .docx-content table td {
-                color: #d1d5db !important;
-                border-bottom-color: #4b5563 !important;
-                border-right-color: #4b5563 !important;
-              }
-              
-              .dark .docx-content table tr:nth-child(even) td {
-                background-color: #1f2937 !important;
-              }
-              
-              .dark .docx-content table tr:hover td {
-                background-color: #374151 !important;
-              }
-              
-              .dark .docx-content strong {
-                color: #f9fafb !important;
-              }
-              
-              .dark .docx-content em {
-                color: #d1d5db !important;
-              }
-            `}</style>
-          </div>
-        )
-      } else {
-        console.log('Rendering fallback content for DOCX') // Debug log
-        console.log('Parsed content type:', parsedContent?.type, 'Has structure:', parsedContent?.hasStructure) // Debug log
-        
-        // For text content or if HTML parsing failed, show text content
-        const content = parsedContent && parsedContent.content ? parsedContent.content : file.content
-        const hasError = parsedContent?.type === 'error' || content.includes('Error extracting content')
-        
-        return (
-          <div className="bg-white dark:bg-gray-800 border rounded-lg p-6 overflow-auto">
-            {/* Document header */}
-            <div className="bg-blue-50 dark:bg-blue-900/20 p-3 border-b rounded-t-lg mb-4">
-              <div className="flex items-center space-x-2">
-                <div className="text-2xl">📝</div>
-                <div>
-                  <div className="font-medium text-blue-800 dark:text-blue-200">
-                    Microsoft Word Document
-                  </div>
-                  <div className="text-sm text-blue-600 dark:text-blue-300">
-                    Text content extracted
-                  </div>
-                </div>
-              </div>
-            </div>
-            
-            <div className={`rounded-lg p-4 text-left ${hasError ? 'bg-red-50 dark:bg-red-900/20' : 'bg-gray-50 dark:bg-gray-900'}`}>
-              <div className="flex items-center mb-3">
-                <div className={`w-3 h-3 rounded-full mr-2 ${hasError ? 'bg-red-500' : 'bg-blue-500'}`}></div>
-                <span className={`font-medium ${hasError ? 'text-red-800 dark:text-red-200' : 'text-blue-800 dark:text-blue-200'}`}>
-                  {hasError ? 'Content Extraction Issue' : 'Document Content'}
-                </span>
-              </div>
-              <div className={`text-sm ${hasError ? 'text-red-700 dark:text-red-300' : 'text-gray-700 dark:text-gray-300'}`}>
-                {/* Show content with proper formatting */}
-                <div style={{ 
-                  whiteSpace: 'pre-wrap', 
-                  fontFamily: 'system-ui, sans-serif',
-                  lineHeight: '1.6',
-                  maxHeight: '400px',
-                  overflowY: 'auto',
-                  padding: '1rem',
-                  border: hasError ? '1px solid #f87171' : '1px solid #e5e7eb',
-                  borderRadius: '0.5rem',
-                  backgroundColor: hasError ? '#fef2f2' : '#ffffff'
-                }}>
-                  {content || 'No content available'}
-                </div>
-              </div>
-            </div>
-          </div>
-        )
-      }
-    } else if (file.type === 'doc') {
-      // Parse structured content for .doc files
-      let parsedContent: StructuredContent | null = null
-      try {
-        parsedContent = JSON.parse(file.content)
-      } catch (e) {
-        parsedContent = { type: 'text', content: file.content, hasStructure: false }
-      }
-
-      return (
-        <div className="bg-white dark:bg-gray-800 border rounded-lg p-6 overflow-auto">
-          <div className="text-center p-8">
-            <div className="text-6xl mb-4">📄</div>
-            <h3 className="text-xl font-semibold text-gray-800 dark:text-gray-200 mb-2">
-              Legacy Word Document (.doc)
-            </h3>
-            <p className="text-gray-600 dark:text-gray-400 mb-4">
-              {file.name}
-            </p>
-            
-            <div className="bg-yellow-50 dark:bg-yellow-900/20 rounded-lg p-4 mb-6">
-              <div className="flex items-center justify-center mb-3">
-                <div className="w-3 h-3 bg-yellow-500 rounded-full mr-2"></div>
-                <span className="text-yellow-800 dark:text-yellow-200 font-medium">Legacy Format</span>
-              </div>
-              <div className="text-sm text-yellow-700 dark:text-yellow-300 text-left">
-                <pre className="whitespace-pre-wrap">{parsedContent ? parsedContent.content : file.content}</pre>
-              </div>
-            </div>
-          </div>
-        </div>
-      )
-    } else if (file.type === 'pdf') {
-      // Parse structured content for PDF files
-      let parsedContent: StructuredContent | null = null
-      try {
-        parsedContent = JSON.parse(file.content)
-      } catch (e) {
-        parsedContent = { type: 'text', content: file.content, hasStructure: false }
-      }
-
-      return (
-        <div className="bg-gray-50 dark:bg-gray-900 border rounded-lg p-6 overflow-auto">
-          <div className="text-center p-8">
-            <div className="text-6xl mb-4">📄</div>
-            <h3 className="text-xl font-semibold text-gray-800 dark:text-gray-200 mb-2">
-              PDF Document
-            </h3>
-            <p className="text-gray-600 dark:text-gray-400 mb-4">
-              {file.name}
-            </p>
-            <div className="bg-orange-50 dark:bg-orange-900/20 p-4 rounded-lg">
-              <div className="text-sm text-orange-700 dark:text-orange-300 text-left">
-                <pre className="whitespace-pre-wrap">{parsedContent ? parsedContent.content : file.content}</pre>
-              </div>
-            </div>
-          </div>
-        </div>
-      )
-    } else {
-      // For other files, show with redaction toggle
-      return (
-        <div className="text-gray-800 dark:text-gray-200 leading-relaxed text-base">
-          {file.redactedContent.map((section, index) => {
-            if (section.type === "paragraph") {
-              return (
-                <span key={index} style={{ whiteSpace: 'pre-wrap' }}>
-                  {section.text}
-                </span>
-              )
-            } else if (section.type === "redacted") {
-              return (
-                <motion.span
-                  key={index}
-                  className={`inline-block relative group cursor-help ${
-                    showRedactions 
-                      ? "bg-black text-black dark:bg-gray-900 dark:text-gray-900 px-1 rounded" 
-                      : "bg-yellow-200 dark:bg-yellow-800 px-1 rounded border border-yellow-400 dark:border-yellow-600"
-                  }`}
-                  whileHover={{ scale: 1.02 }}
-                  title={showRedactions ? section.originalText : `Redacted: ${section.category}`}
-                >
-                  {showRedactions ? section.text : section.originalText}
-                  
-                  {/* Tooltip */}
-                  <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-2 py-1 bg-gray-900 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity z-10 whitespace-nowrap">
-                    {showRedactions ? `Category: ${section.category}` : 'This content was redacted'}
-                  </div>
-                </motion.span>
-              )
-            }
-            return null
-          })}
-        </div>
-      )
-    }
-  }
-
-  // Update the processFiles function - remove the inner function definition:
-  const processFiles = async (files: Array<{
-    name: string
-    size: number
-    type: string
-    content?: string
-    lastModified?: number
-  }>) => {
-    console.log('Processing files:', files) // Debug log
-    const processed: ProcessedFile[] = []
+  const loadPDF = useCallback(async () => {
+    setLoading(true)
+    setError('')
     
-    for (const file of files) {
-      const fileId = file.name.replace(/[^a-zA-Z0-9]/g, '_')
+    try {
+      console.log('Loading PDF for redaction:', fileName)
       
-      // Use the function that's now defined at component level
-      const processedFile: ProcessedFile = {
-        id: fileId,
-        name: file.name,
-        type: file.type || getFileTypeFromName(file.name), // Now this function is accessible
-        title: `${file.name.replace(/\.[^/.]+$/, "")} - Document Preview`,
-        content: "",
-        redactedContent: [],
-        redactionStats: { totalRedactions: 0, categories: {} },
-        isLoading: true
+      // Cancel any ongoing operations
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
       }
+      abortControllerRef.current = new AbortController()
       
-      processed.push(processedFile)
-    }
-    
-    setProcessedFiles(processed)
-    setActiveFileId(processed[0]?.id || "")
-    
-    // Process file contents
-    for (let i = 0; i < files.length; i++) {
-      try {
-        const file = files[i]
-        console.log('Processing file:', file.name, 'Content available:', !!file.content) // Debug log
-        
-        if (file.content) {
-          // Use the stored content directly
-          const content = file.content
-          let parsedJson = null
-          const fileType = getFileTypeFromName(file.name) // Now this function is accessible
-          
-          // Try to parse JSON if it's a JSON file
-          if (fileType === 'json') {
-            try {
-              parsedJson = JSON.parse(content)
-              console.log('Successfully parsed JSON for:', file.name)
-            } catch (e) {
-              console.warn('Failed to parse JSON for:', file.name, e)
-            }
-          }
-          
-          // For text-based files that we want to show as-is, skip redaction processing
-          const textBasedFiles = ['json', 'txt', 'csv', 'xml']
-          let redactedData = { content: [], stats: { totalRedactions: 0, categories: {} } }
-          
-          if (!textBasedFiles.includes(fileType) && !['docx', 'doc', 'pdf'].includes(fileType)) {
-            // Only apply redaction to files that aren't meant to be shown as-is
-            redactedData = simulateRedaction(content, file.name)
-          } else {
-            // For text-based files and documents, create a simple content structure
-            redactedData = {
-              content: [{
-                type: "paragraph" as const,
-                text: content
-              }],
-              stats: { totalRedactions: 0, categories: {} }
-            }
-          }
-          
-          setProcessedFiles(prev => prev.map(pf => 
-            pf.id === processed[i].id 
-              ? {
-                  ...pf,
-                  content,
-                  rawJsonContent: parsedJson,
-                  redactedContent: redactedData.content,
-                  redactionStats: redactedData.stats,
-                  isLoading: false
-                }
-              : pf
-          ))
-        } else {
-          console.error('No content found for file:', file.name)
-          setProcessedFiles(prev => prev.map(pf => 
-            pf.id === processed[i].id 
-              ? {
-                  ...pf,
-                  isLoading: false,
-                  error: "File content not available. Please re-upload the file."
-                }
-              : pf
-          ))
+      let pdfData: ArrayBuffer
+      
+      if (file instanceof File || file instanceof Blob) {
+        pdfData = await file.arrayBuffer()
+      } else if (typeof file === 'string') {
+        // Handle base64 data
+        const base64Data = file.includes(',') ? file.split(',')[1] : file
+        const binaryString = atob(base64Data)
+        const bytes = new Uint8Array(binaryString.length)
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i)
         }
-      } catch (error) {
-        console.error('Error processing file:', error)
-        setProcessedFiles(prev => prev.map(pf => 
-          pf.id === processed[i].id 
-            ? {
-                ...pf,
-                isLoading: false,
-                error: "Failed to process file content: " + (error as Error).message
-              }
-            : pf
-        ))
+        pdfData = bytes.buffer
+      } else {
+        throw new Error('Unsupported file format for PDF redaction')
+      }
+
+      const loadingTask = pdfjsLib.getDocument({ 
+        data: pdfData,
+        // Add options to prevent canvas conflicts
+        cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/',
+        cMapPacked: true,
+        standardFontDataUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/standard_fonts/'
+      })
+      
+      const pdfDoc = await loadingTask.promise
+      
+      if (abortControllerRef.current?.signal.aborted) {
+        return
+      }
+      
+      setPdf(pdfDoc)
+      setTotalPages(pdfDoc.numPages)
+      setCurrentPage(1)
+      
+      console.log('PDF loaded successfully for redaction:', {
+        pages: pdfDoc.numPages,
+        fileName: fileName
+      })
+      
+    } catch (err) {
+      if (abortControllerRef.current?.signal.aborted) {
+        return
+      }
+      console.error('Error loading PDF for redaction:', err)
+      setError(`Failed to load PDF: ${(err as Error).message}`)
+    } finally {
+      setLoading(false)
+    }
+  }, [file, fileName])
+
+  const renderPage = useCallback(async (pageNumber: number) => {
+    if (!pdf || !canvasRef.current || !textLayerRef.current || !overlayRef.current || isRendering) {
+      return
+    }
+
+    // Cancel any ongoing render task
+    if (renderTaskRef.current) {
+      try {
+        renderTaskRef.current.cancel()
+        await new Promise(resolve => setTimeout(resolve, 50))
+      } catch (e) {
+        console.log('Render task cancellation:', e)
       }
     }
-  }
 
-  // Add the simulateRedaction function:
-  const simulateRedaction = (content: string, filename: string) => {
-    // This is a mock redaction function - replace with real redaction logic
-    const categories = ['PII', 'Financial', 'Medical', 'Confidential']
-    const redactionPatterns = [
-      /\b\d{3}-\d{2}-\d{4}\b/g, // SSN pattern
-      /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, // Email pattern
-      /\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/g, // Credit card pattern
-      /\b\(\d{3}\)\s?\d{3}-\d{4}\b/g, // Phone number pattern
-    ]
+    setIsRendering(true)
     
-    let processedContent: Array<{
-      type: "paragraph" | "redacted"
-      text: string
-      originalText?: string
-      category?: string
-    }> = []
-    
-    let stats = { totalRedactions: 0, categories: {} as Record<string, number> }
-    let lastIndex = 0
-    
-    // Simple redaction simulation
-    redactionPatterns.forEach((pattern, patternIndex) => {
-      const matches = Array.from(content.matchAll(pattern))
-      matches.forEach(match => {
-        if (match.index !== undefined) {
-          // Add text before the match
-          if (match.index > lastIndex) {
-            processedContent.push({
-              type: "paragraph",
-              text: content.slice(lastIndex, match.index)
-            })
-          }
-          
-          // Add redacted content
-          const category = categories[patternIndex % categories.length]
-          processedContent.push({
-            type: "redacted",
-            text: "█".repeat(match[0].length),
-            originalText: match[0],
-            category
+    try {
+      console.log('Rendering page:', pageNumber)
+      
+      const page = await pdf.getPage(pageNumber)
+      const viewport = page.getViewport({ scale })
+      
+      const canvas = canvasRef.current
+      const context = canvas.getContext('2d')
+      const textLayer = textLayerRef.current
+      const overlay = overlayRef.current
+      
+      // Clear any existing content first
+      if (context) {
+        context.clearRect(0, 0, canvas.width, canvas.height)
+      }
+      textLayer.innerHTML = ''
+      overlay.innerHTML = ''
+      
+      // Set canvas dimensions
+      canvas.height = viewport.height
+      canvas.width = viewport.width
+      
+      // Set text layer dimensions
+      textLayer.style.width = `${viewport.width}px`
+      textLayer.style.height = `${viewport.height}px`
+      
+      // Set overlay dimensions
+      overlay.style.width = `${viewport.width}px`
+      overlay.style.height = `${viewport.height}px`
+      
+      // Render PDF page on canvas
+      const renderContext = {
+        canvasContext: context,
+        viewport: viewport,
+      }
+      
+      renderTaskRef.current = page.render(renderContext)
+      await renderTaskRef.current.promise
+      
+      console.log('Canvas render completed for page:', pageNumber)
+      renderTaskRef.current = null
+      
+      // Get text content for selection
+      const textContent = await page.getTextContent()
+      const textItems = textContent.items as any[]
+      setTextItems(textItems)
+      
+      console.log('Text content loaded, items:', textItems.length)
+      
+      // Create interactive text layer for selection
+      textItems.forEach((item: any, index: number) => {
+        const textDiv = document.createElement('div')
+        
+        // Position and size
+        textDiv.style.position = 'absolute'
+        textDiv.style.left = `${item.transform[4]}px`
+        textDiv.style.top = `${viewport.height - item.transform[5] - item.height}px`
+        textDiv.style.width = `${item.width || 100}px`
+        textDiv.style.height = `${item.height}px`
+        textDiv.style.fontSize = `${item.height}px`
+        textDiv.style.fontFamily = item.fontName || 'sans-serif'
+        
+        // Make text visible in redaction mode, invisible in view mode
+        if (redactionMode) {
+          textDiv.style.backgroundColor = selectedTextItems.has(index) ? 'rgba(0, 0, 0, 0.8)' : 'rgba(255, 0, 0, 0.1)'
+          textDiv.style.color = selectedTextItems.has(index) ? 'white' : 'rgba(255, 0, 0, 0.7)'
+          textDiv.style.border = '1px solid rgba(255, 0, 0, 0.3)'
+          textDiv.style.cursor = 'pointer'
+          textDiv.style.pointerEvents = 'auto'
+        } else {
+          textDiv.style.color = 'transparent'
+          textDiv.style.backgroundColor = 'transparent'
+          textDiv.style.cursor = 'text'
+          textDiv.style.pointerEvents = 'auto'
+        }
+        
+        // Text properties
+        textDiv.style.whiteSpace = 'nowrap'
+        textDiv.style.transformOrigin = '0% 0%'
+        textDiv.style.userSelect = redactionMode ? 'none' : 'text'
+        textDiv.style.overflow = 'hidden'
+        textDiv.style.zIndex = '1'
+        
+        // Content
+        textDiv.textContent = item.str
+        textDiv.dataset.index = index.toString()
+        textDiv.dataset.text = item.str
+        textDiv.title = redactionMode ? `Click to select: "${item.str}"` : item.str
+        
+        // Event handlers for redaction mode
+        if (redactionMode) {
+          // Click handler
+          textDiv.addEventListener('click', (e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            console.log('Text clicked:', item.str, 'Index:', index)
+            toggleTextSelection(index, item)
           })
           
-          stats.totalRedactions++
-          stats.categories[category] = (stats.categories[category] || 0) + 1
-          lastIndex = match.index + match[0].length
+          // Hover effects
+          textDiv.addEventListener('mouseenter', () => {
+            if (!selectedTextItems.has(index)) {
+              textDiv.style.backgroundColor = 'rgba(255, 0, 0, 0.3)'
+              textDiv.style.color = 'rgba(255, 0, 0, 0.9)'
+              textDiv.style.border = '1px solid rgba(255, 0, 0, 0.6)'
+            }
+          })
+          
+          textDiv.addEventListener('mouseleave', () => {
+            if (!selectedTextItems.has(index)) {
+              textDiv.style.backgroundColor = 'rgba(255, 0, 0, 0.1)'
+              textDiv.style.color = 'rgba(255, 0, 0, 0.7)'
+              textDiv.style.border = '1px solid rgba(255, 0, 0, 0.3)'
+            }
+          })
+        }
+        
+        textLayer.appendChild(textDiv)
+      })
+      
+      console.log('Text layer created with', textItems.length, 'items')
+      
+      // Render existing redaction areas
+      renderRedactionAreas(pageNumber)
+      
+      console.log('Page render completed:', pageNumber)
+      
+    } catch (err) {
+      if (err?.name === 'RenderingCancelledException' || err?.message?.includes('cancelled')) {
+        console.log('Render cancelled for page:', pageNumber)
+        return
+      }
+      
+      console.error('Error rendering PDF page:', err)
+      setError(`Failed to render page ${pageNumber}: ${(err as Error).message}`)
+    } finally {
+      setIsRendering(false)
+      renderTaskRef.current = null
+    }
+  }, [pdf, scale, redactionMode, selectedTextItems])
+
+  const toggleTextSelection = (index: number, textItem: any) => {
+    console.log('Toggle text selection called for index:', index, 'text:', textItem.str)
+    
+    setSelectedTextItems(prev => {
+      const newSelection = new Set(prev)
+      const textDiv = textLayerRef.current?.children[index] as HTMLElement
+      
+      if (newSelection.has(index)) {
+        newSelection.delete(index)
+        console.log('Deselected text:', textItem.str)
+        // Remove visual highlight
+        if (textDiv) {
+          textDiv.style.backgroundColor = 'rgba(255, 0, 0, 0.1)'
+          textDiv.style.color = 'rgba(255, 0, 0, 0.7)'
+          textDiv.style.border = '1px solid rgba(255, 0, 0, 0.3)'
+        }
+      } else {
+        newSelection.add(index)
+        console.log('Selected text:', textItem.str)
+        // Add visual highlight
+        if (textDiv) {
+          textDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.8)'
+          textDiv.style.color = 'white'
+          textDiv.style.border = '1px solid black'
+        }
+      }
+      
+      console.log('Total selected items:', newSelection.size)
+      return newSelection
+    })
+  }
+
+  // Update the text layer when redaction mode changes
+  useEffect(() => {
+    if (textLayerRef.current && textItems.length > 0) {
+      console.log('Updating text layer for redaction mode:', redactionMode)
+      
+      Array.from(textLayerRef.current.children).forEach((div, index) => {
+        const textDiv = div as HTMLElement
+        
+        if (redactionMode) {
+          // Make text visible and clickable in redaction mode
+          textDiv.style.backgroundColor = selectedTextItems.has(index) ? 'rgba(0, 0, 0, 0.8)' : 'rgba(255, 0, 0, 0.1)'
+          textDiv.style.color = selectedTextItems.has(index) ? 'white' : 'rgba(255, 0, 0, 0.7)'
+          textDiv.style.border = '1px solid rgba(255, 0, 0, 0.3)'
+          textDiv.style.cursor = 'pointer'
+          textDiv.style.pointerEvents = 'auto'
+          textDiv.style.userSelect = 'none'
+          textDiv.title = `Click to select: "${textDiv.textContent}"`
+        } else {
+          // Make text invisible in view mode
+          textDiv.style.backgroundColor = 'transparent'
+          textDiv.style.color = 'transparent'
+          textDiv.style.border = 'none'
+          textDiv.style.cursor = 'text'
+          textDiv.style.pointerEvents = 'auto'
+          textDiv.style.userSelect = 'text'
+          textDiv.title = textDiv.textContent || ''
         }
       })
+    }
+  }, [redactionMode, selectedTextItems, textItems])
+
+  // Enhanced area selection with drag
+  const handleMouseDown = (event: React.MouseEvent) => {
+    if (!redactionMode || !canvasRef.current) return
+    
+    const rect = canvasRef.current.getBoundingClientRect()
+    const x = event.clientX - rect.left
+    const y = event.clientY - rect.top
+    
+    setIsSelecting(true)
+    setSelectionStart({ x, y })
+    
+    console.log('Started drag selection at:', x, y)
+  }
+
+  const handleMouseMove = (event: React.MouseEvent) => {
+    if (!isSelecting || !selectionStart || !canvasRef.current) return
+    
+    const rect = canvasRef.current.getBoundingClientRect()
+    const currentX = event.clientX - rect.left
+    const currentY = event.clientY - rect.top
+    
+    const width = currentX - selectionStart.x
+    const height = currentY - selectionStart.y
+    
+    setCurrentSelection({
+      id: Date.now().toString(),
+      x: Math.min(selectionStart.x, currentX),
+      y: Math.min(selectionStart.y, currentY),
+      width: Math.abs(width),
+      height: Math.abs(height),
+      page: currentPage
+    })
+  }
+
+  const handleMouseUp = () => {
+    if (!isSelecting || !currentSelection || !textLayerRef.current) return
+    
+    console.log('Ended drag selection:', currentSelection)
+    
+    // Find text items within the selection area
+    const selectedIndices = new Set<number>()
+    
+    Array.from(textLayerRef.current.children).forEach((div, index) => {
+      const textDiv = div as HTMLElement
+      const rect = textDiv.getBoundingClientRect()
+      const containerRect = textLayerRef.current!.getBoundingClientRect()
+      
+      const textX = rect.left - containerRect.left
+      const textY = rect.top - containerRect.top
+      const textWidth = rect.width
+      const textHeight = rect.height
+      
+      // Check if text item overlaps with selection
+      if (textX < currentSelection.x + currentSelection.width &&
+          textX + textWidth > currentSelection.x &&
+          textY < currentSelection.y + currentSelection.height &&
+          textY + textHeight > currentSelection.y) {
+        selectedIndices.add(index)
+      }
     })
     
-    // Add remaining content
-    if (lastIndex < content.length) {
-      processedContent.push({
-        type: "paragraph",
-        text: content.slice(lastIndex)
+    if (selectedIndices.size > 0) {
+      console.log('Selected', selectedIndices.size, 'text items via drag')
+      setSelectedTextItems(prev => new Set([...prev, ...selectedIndices]))
+      
+      // Update visual highlights
+      selectedIndices.forEach(index => {
+        const textDiv = textLayerRef.current?.children[index] as HTMLElement
+        if (textDiv) {
+          textDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.8)'
+          textDiv.style.color = 'white'
+          textDiv.style.border = '1px solid black'
+        }
       })
     }
     
-    // If no redactions found, treat as single paragraph
-    if (processedContent.length === 0) {
-      processedContent.push({
-        type: "paragraph",
-        text: content
-      })
-    }
-    
-    return { content: processedContent, stats }
+    setIsSelecting(false)
+    setSelectionStart(null)
+    setCurrentSelection(null)
   }
 
-  // Add the copyToClipboard function:
-  const copyToClipboard = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text)
-      console.log('Content copied to clipboard')
-    } catch (error) {
-      console.error('Failed to copy to clipboard:', error)
-      // Fallback method
-      const textArea = document.createElement('textarea')
-      textArea.value = text
-      document.body.appendChild(textArea)
-      textArea.select()
-      try {
-        document.execCommand('copy')
-        console.log('Content copied to clipboard (fallback)')
-      } catch (fallbackError) {
-        console.error('Fallback copy method also failed:', fallbackError)
+  const createRedactionFromSelection = () => {
+    if (selectedTextItems.size === 0) {
+      alert('Please select some text first')
+      return
+    }
+    
+    // Calculate bounding box for selected text items
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    
+    selectedTextItems.forEach(index => {
+      const textItem = textItems[index]
+      if (textItem) {
+        const x = textItem.transform[4]
+        const y = textItem.transform[5]
+        const width = textItem.width || 100 // fallback width
+        const height = textItem.height
+        
+        minX = Math.min(minX, x)
+        minY = Math.min(minY, y - height)
+        maxX = Math.max(maxX, x + width)
+        maxY = Math.max(maxY, y)
       }
-      document.body.removeChild(textArea)
+    })
+    
+    if (minX === Infinity) return
+    
+    // Create redaction area
+    const redactionArea: RedactionArea = {
+      id: Date.now().toString(),
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY,
+      page: currentPage,
+      text: Array.from(selectedTextItems).map(index => textItems[index]?.str || '').join(' ')
+    }
+    
+    setRedactionAreas(prev => [...prev, redactionArea])
+    
+    // Clear selection
+    clearCurrentSelection()
+    
+    console.log('Created redaction area:', redactionArea)
+    
+    // Re-render to show redaction
+    setTimeout(() => renderPage(currentPage), 100)
+  }
+
+  const renderRedactionAreas = (pageNumber: number) => {
+    if (!overlayRef.current) return
+    
+    // Clear existing redactions
+    overlayRef.current.innerHTML = ''
+    
+    // Get redaction areas for current page
+    const pageRedactions = redactionAreas.filter(area => area.page === pageNumber)
+    
+    pageRedactions.forEach((area, index) => {
+      const redactionDiv = document.createElement('div')
+      redactionDiv.style.position = 'absolute'
+      redactionDiv.style.left = `${area.x}px`
+      redactionDiv.style.top = `${area.y}px`
+      redactionDiv.style.width = `${area.width}px`
+      redactionDiv.style.height = `${area.height}px`
+      redactionDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.9)'
+      redactionDiv.style.border = '1px solid #666'
+      redactionDiv.style.cursor = 'pointer'
+      redactionDiv.style.zIndex = '10'
+      redactionDiv.title = `Redaction ${index + 1}: ${area.text || 'Selected area'}`
+      
+      // Add remove button
+      const removeBtn = document.createElement('button')
+      removeBtn.innerHTML = '×'
+      removeBtn.style.position = 'absolute'
+      removeBtn.style.top = '-8px'
+      removeBtn.style.right = '-8px'
+      removeBtn.style.width = '16px'
+      removeBtn.style.height = '16px'
+      removeBtn.style.backgroundColor = '#ff4444'
+      removeBtn.style.color = 'white'
+      removeBtn.style.border = 'none'
+      removeBtn.style.borderRadius = '50%'
+      removeBtn.style.fontSize = '10px'
+      removeBtn.style.cursor = 'pointer'
+      removeBtn.style.lineHeight = '1'
+      removeBtn.style.zIndex = '11'
+      removeBtn.title = 'Remove redaction'
+      removeBtn.onclick = (e) => {
+        e.stopPropagation()
+        removeRedaction(area.id)
+      }
+      
+      redactionDiv.appendChild(removeBtn)
+      overlayRef.current.appendChild(redactionDiv)
+    })
+  }
+
+  const removeRedaction = (redactionId: string) => {
+    setRedactionAreas(prev => prev.filter(area => area.id !== redactionId))
+    setTimeout(() => renderPage(currentPage), 100)
+  }
+
+  const clearAllRedactions = () => {
+    setRedactionAreas([])
+    setSelectedTextItems(new Set())
+    setTimeout(() => renderPage(currentPage), 100)
+  }
+
+  const clearCurrentSelection = () => {
+    setSelectedTextItems(new Set())
+    // Remove visual highlights
+    Array.from(textLayerRef.current?.children || []).forEach((div) => {
+      const textDiv = div as HTMLElement
+      textDiv.style.backgroundColor = 'transparent'
+      textDiv.style.color = 'transparent'
+    })
+  }
+
+  const downloadRedactedPDF = async () => {
+    if (!pdf || redactionAreas.length === 0) {
+      alert('No redactions to apply')
+      return
+    }
+
+    try {
+      console.log('Applying redactions:', redactionAreas)
+      alert(`Redaction areas marked for removal: ${redactionAreas.length}. In a production environment, these would be permanently removed from the PDF using server-side processing.`)
+    } catch (error) {
+      console.error('Error creating redacted PDF:', error)
+      alert('Failed to create redacted PDF')
     }
   }
 
-  // Process uploaded files and read their content
-  useEffect(() => {
-    console.log('PreviewCompo received files:', uploadedFiles) // Debug log
-    if (uploadedFiles && uploadedFiles.length > 0) {
-      processFiles(uploadedFiles)
-    } else {
-      // Clear processed files when no files are uploaded
-      setProcessedFiles([])
-      setActiveFileId("")
+  const saveRedactionData = () => {
+    const redactionData = {
+      fileName,
+      redactions: redactionAreas,
+      timestamp: new Date().toISOString()
     }
-  }, [uploadedFiles])
+    
+    const dataStr = JSON.stringify(redactionData, null, 2)
+    const blob = new Blob([dataStr], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${fileName}_redactions.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
 
-  // Find the active file
-  const activeFile = processedFiles.find(file => file.id === activeFileId)
+  // Cleanup function
+  useEffect(() => {
+    return () => {
+      // Cancel ongoing operations when component unmounts
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+      if (renderTaskRef.current) {
+        try {
+          renderTaskRef.current.cancel()
+        } catch (e) {
+          console.log('Cleanup render task cancellation:', e)
+        }
+      }
+    }
+  }, [])
 
-  // Rest of the component JSX remains the same...
+  useEffect(() => {
+    loadPDF()
+  }, [loadPDF])
+
+  useEffect(() => {
+    if (pdf && !isRendering) {
+      // Add a small delay to prevent rapid re-renders
+      const timeoutId = setTimeout(() => {
+        renderPage(currentPage)
+      }, 100)
+      
+      return () => clearTimeout(timeoutId)
+    }
+  }, [pdf, currentPage, renderPage])
+
+  useEffect(() => {
+    if (redactionMode) {
+      const cleanup = selectTextByDragging()
+      return cleanup
+    }
+  }, [redactionMode])
+
+  const goToPage = (page: number) => {
+    if (page >= 1 && page <= totalPages && !isRendering) {
+      // Cancel any ongoing render first
+      if (renderTaskRef.current) {
+        try {
+          renderTaskRef.current.cancel()
+        } catch (e) {
+          console.log('Page navigation render cancellation:', e)
+        }
+      }
+      
+      // Clear selection when changing pages
+      clearCurrentSelection()
+      setCurrentPage(page)
+    }
+  }
+
+  const zoomIn = () => {
+    if (!isRendering) {
+      setScale(prev => Math.min(prev + 0.25, 3))
+    }
+  }
+  
+  const zoomOut = () => {
+    if (!isRendering) {
+      setScale(prev => Math.max(prev - 0.25, 0.5))
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-96 bg-gray-50 dark:bg-gray-900 rounded-lg">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600 dark:text-gray-400">Loading PDF for redaction...</p>
+          <p className="text-xs text-gray-500 dark:text-gray-500 mt-2">Preparing interactive editor</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center h-96 bg-gray-50 dark:bg-gray-900 rounded-lg">
+        <div className="text-center max-w-md">
+          <div className="text-red-500 text-4xl mb-4">⚠️</div>
+          <p className="text-red-600 dark:text-red-400 mb-4 text-sm whitespace-pre-line">
+            {error}
+          </p>
+          <Button 
+            onClick={() => {
+              setError('')
+              loadPDF()
+            }} 
+            variant="outline" 
+            size="sm"
+            disabled={loading || isRendering}
+          >
+            Try Again
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className={`space-y-6 ${className}`}>
-      {/* File Selector Tabs */}
-      {processedFiles.length > 1 && (
-        <div className="flex space-x-2 overflow-x-auto pb-2">
-          {processedFiles.map((file) => (
-            <Button
-              key={file.id}
-              variant={activeFileId === file.id ? "default" : "outline"}
-              size="sm"
-              onClick={() => setActiveFileId(file.id)}
-              className="whitespace-nowrap"
-            >
-              <FileText className="w-4 h-4 mr-2" />
-              {file.name}
-            </Button>
-          ))}
+    <div className="space-y-4">
+      {/* PDF Redaction Controls */}
+      <div className="flex flex-wrap items-center justify-between gap-4 p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+        <div className="flex items-center space-x-2">
+          <span className="text-sm font-medium">PDF Redaction Editor</span>
+          <Badge variant={redactionMode ? "destructive" : "secondary"} className="text-xs">
+            {redactionMode ? "Redaction Mode" : "View Mode"}
+          </Badge>
+          {isRendering && (
+            <Badge variant="outline" className="text-xs">
+              Rendering...
+            </Badge>
+          )}
+          {selectedTextItems.size > 0 && (
+            <Badge variant="outline" className="text-xs">
+              {selectedTextItems.size} text items selected
+            </Badge>
+          )}
+          {redactionAreas.length > 0 && (
+            <Badge variant="outline" className="text-xs">
+              {redactionAreas.length} redactions
+            </Badge>
+          )}
+        </div>
+
+        <div className="flex items-center space-x-2">
+          <Button
+            onClick={() => {
+              setRedactionMode(!redactionMode)
+              if (!redactionMode) {
+                clearCurrentSelection()
+              }
+            }}
+            variant={redactionMode ? "destructive" : "default"}
+            size="sm"
+            disabled={isRendering}
+          >
+            <Edit3 className="w-4 h-4 mr-2" />
+            {redactionMode ? "Exit Redaction" : "Start Redacting"}
+          </Button>
+          
+          {redactionMode && selectedTextItems.size > 0 && (
+            <>
+              <Button 
+                onClick={createRedactionFromSelection} 
+                variant="default" 
+                size="sm"
+                disabled={isRendering}
+              >
+                <span className="mr-2">⬛</span>
+                Apply Redaction
+              </Button>
+              <Button 
+                onClick={clearCurrentSelection} 
+                variant="outline" 
+                size="sm"
+                disabled={isRendering}
+              >
+                Clear Selection
+              </Button>
+            </>
+          )}
+          
+          {redactionAreas.length > 0 && (
+            <>
+              <Button 
+                onClick={clearAllRedactions} 
+                variant="outline" 
+                size="sm"
+                disabled={isRendering}
+              >
+                <Undo className="w-4 h-4 mr-2" />
+                Clear All
+              </Button>
+              <Button 
+                onClick={saveRedactionData} 
+                variant="outline" 
+                size="sm"
+                disabled={isRendering}
+              >
+                <Save className="w-4 h-4 mr-2" />
+                Save Redactions
+              </Button>
+              <Button 
+                onClick={downloadRedactedPDF} 
+                variant="default" 
+                size="sm"
+                disabled={isRendering}
+              >
+                <Download className="w-4 h-4 mr-2" />
+                Apply Redactions
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* PDF Navigation Controls */}
+      <div className="flex flex-wrap items-center justify-between gap-4 p-4 bg-white dark:bg-gray-800 rounded-lg border">
+        <div className="flex items-center space-x-2">
+          <Button
+            onClick={() => goToPage(currentPage - 1)}
+            disabled={currentPage <= 1 || isRendering}
+            variant="outline"
+            size="sm"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </Button>
+          
+          <span className="text-sm font-medium px-3">
+            Page {currentPage} of {totalPages}
+          </span>
+          
+          <Button
+            onClick={() => goToPage(currentPage + 1)}
+            disabled={currentPage >= totalPages || isRendering}
+            variant="outline"
+            size="sm"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </Button>
+        </div>
+
+        <div className="flex items-center space-x-2">
+          <Button 
+            onClick={zoomOut} 
+            variant="outline" 
+            size="sm"
+            disabled={isRendering}
+          >
+            <ZoomOut className="w-4 h-4" />
+          </Button>
+          <span className="text-sm px-2">{Math.round(scale * 100)}%</span>
+          <Button 
+            onClick={zoomIn} 
+            variant="outline" 
+            size="sm"
+            disabled={isRendering}
+          >
+            <ZoomIn className="w-4 h-4" />
+          </Button>
+        </div>
+      </div>
+
+      {/* Instructions */}
+      {redactionMode && (
+        <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+          <div className="flex items-center space-x-2">
+            <div className="text-yellow-600 dark:text-yellow-400 text-sm">
+              💡 <strong>Redaction Mode:</strong> Click on individual text items to select them, or drag to select multiple words. 
+              Selected text will be highlighted. Click "Apply Redaction" to create black boxes over selected text.
+            </div>
+          </div>
         </div>
       )}
 
-      {/* No Files State */}
-      {processedFiles.length === 0 && (
-        <Card className="border-2 border-dashed border-gray-300 dark:border-gray-600">
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <div className="text-6xl mb-4">📄</div>
-            <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-2">
-              No files to preview
-            </h3>
-            <p className="text-gray-600 dark:text-gray-400 text-center max-w-md">
-              Upload files from the main page to see their content preview here. 
-              Supported formats include PDF, DOCX, DOC, JSON, TXT, CSV, and XML.
-            </p>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* File Preview */}
-      {activeFile && (
-        <div className="space-y-4">
-          {/* Header */}
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-200">
-                {activeFile.name}
-              </h2>
-              <p className="text-sm text-gray-600 dark:text-gray-400">
-                {activeFile.type.toUpperCase()} File Preview
-              </p>
-            </div>
-
-            <div className="flex items-center space-x-2">
-              {/* Toggle Redactions - Only for files that support redaction */}
-              {!['json', 'txt', 'csv', 'xml', 'docx', 'doc', 'pdf'].includes(activeFile.type) && (
-                <Button
-                  variant={showRedactions ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setShowRedactions(!showRedactions)}
-                  className="flex items-center space-x-2"
-                  disabled={activeFile.isLoading}
-                >
-                  {showRedactions ? (
-                    <>
-                      <EyeOff className="w-4 h-4" />
-                      <span>Hide Redactions</span>
-                    </>
-                  ) : (
-                    <>
-                      <Eye className="w-4 h-4" />
-                      <span>Show Redactions</span>
-                    </>
-                  )}
-                </Button>
-              )}
-
-              {/* Copy Button */}
-              {!activeFile.isLoading && activeFile.content && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    let contentToCopy = activeFile.content
-                    
-                    // For JSON files, use formatted version if available
-                    if (activeFile.type === 'json' && activeFile.rawJsonContent) {
-                      contentToCopy = JSON.stringify(activeFile.rawJsonContent, null, 2)
-                    }
-                    
-                    copyToClipboard(contentToCopy)
-                  }}
-                  className="flex items-center space-x-2"
-                >
-                  <Copy className="w-4 h-4" />
-                  <span>Copy</span>
-                </Button>
-              )}
-            </div>
-          </div>
-
-          {/* Document Content */}
-          <div className="prose prose-gray dark:prose-invert max-w-none">
-            {activeFile.isLoading ? (
-              <div className="flex items-center justify-center p-8">
+      {/* PDF Viewer Container */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border shadow-sm">
+        <div 
+          ref={containerRef}
+          className="relative overflow-auto max-h-[600px] p-4"
+        >
+          <div className="relative inline-block">
+            {/* Canvas for PDF rendering */}
+            <canvas
+              ref={canvasRef}
+              className="border border-gray-200 dark:border-gray-700 rounded shadow-sm"
+              style={{ 
+                display: 'block',
+                userSelect: 'none',
+                opacity: isRendering ? 0.7 : 1,
+                transition: 'opacity 0.2s ease'
+              }}
+            />
+            
+            {/* Text Layer for Selection */}
+            <div
+              ref={textLayerRef}
+              className="absolute top-0 left-0"
+              style={{ 
+                pointerEvents: redactionMode && !isRendering ? 'auto' : 'auto',
+                userSelect: redactionMode ? 'none' : 'text',
+                zIndex: 1
+              }}
+            />
+            
+            {/* Redaction Overlay */}
+            <div
+              ref={overlayRef}
+              className="absolute top-0 left-0 pointer-events-auto"
+              style={{ 
+                zIndex: 2
+              }}
+            />
+            
+            {/* Rendering Overlay */}
+            {isRendering && (
+              <div className="absolute top-0 left-0 w-full h-full bg-gray-100 bg-opacity-50 flex items-center justify-center z-50">
                 <div className="text-center">
-                  <motion.div
-                    animate={{ rotate: 360 }}
-                    transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                    className="w-8 h-8 mx-auto mb-4"
-                  >
-                    ⚙️
-                  </motion.div>
-                  <p className="text-gray-600 dark:text-gray-400">Loading file content...</p>
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-2"></div>
+                  <p className="text-sm text-gray-600">Rendering page...</p>
                 </div>
-              </div>
-            ) : activeFile.error ? (
-              <div className="flex items-center justify-center p-8">
-                <div className="text-center text-red-600 dark:text-red-400">
-                  <AlertCircle className="w-8 h-8 mx-auto mb-4" />
-                  <p>{activeFile.error}</p>
-                </div>
-              </div>
-            ) : (
-              <div 
-                className="border rounded-lg p-6 max-h-96 overflow-y-auto"
-                style={{ 
-                  maxHeight: activeFile.content.split('\n').length > 20 ? '400px' : 'auto'
-                }}
-              >
-                {renderFileContent(activeFile)}
               </div>
             )}
           </div>
+        </div>
+      </div>
 
-          {/* File Information */}
-          {!activeFile.isLoading && !activeFile.error && (
-            <Card className="border border-gray-200 dark:border-gray-700">
-              <CardContent className="p-4">
-                <h3 className="font-semibold text-gray-800 dark:text-gray-200 mb-3">
-                  File Information - {activeFile.name}
-                </h3>
-                
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                  <div className="text-center">
-                    <div className="text-lg font-bold text-blue-600 dark:text-blue-400">
-                      {activeFile.type.toUpperCase()}
-                    </div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400">
-                      File Type
-                    </div>
+      {/* Redaction List */}
+      {redactionAreas.length > 0 && (
+        <div className="bg-white dark:bg-gray-800 rounded-lg border p-4">
+          <h3 className="text-lg font-semibold mb-3">Redaction Areas ({redactionAreas.length})</h3>
+          <div className="space-y-2 max-h-32 overflow-y-auto">
+            {redactionAreas.map((area, index) => (
+              <div key={area.id} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded text-sm">
+                <div>
+                  <div className="font-medium">
+                    Page {area.page} - Area {index + 1}
                   </div>
-                  
-                  <div className="text-center">
-                    <div className="text-lg font-bold text-green-600 dark:text-green-400">
-                      {activeFile.content.split('\n').length}
+                  {area.text && (
+                    <div className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[300px]">
+                      "{area.text}"
                     </div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400">
-                      Lines
-                    </div>
-                  </div>
-                  
-                  <div className="text-center">
-                    <div className="text-lg font-bold text-purple-600 dark:text-purple-400">
-                      {activeFile.content.length}
-                    </div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400">
-                      Characters
-                    </div>
-                  </div>
-                  
-                  <div className="text-center">
-                    <div className="text-lg font-bold text-orange-600 dark:text-orange-400">
-                      {['json', 'txt', 'csv', 'xml'].includes(activeFile.type) ? 'Raw Content' : 
-                       activeFile.type === 'docx' && activeFile.content && !activeFile.content.includes('Binary Document File:') ? 'Extracted Text' :
-                       ['docx', 'doc', 'pdf'].includes(activeFile.type) ? 'Document' :
-                       activeFile.redactionStats.totalRedactions > 0 ? 'Redacted' : 'No Redaction'}
-                    </div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400">
-                      Display Mode
-                    </div>
-                  </div>
+                  )}
                 </div>
-
-                {/* Show redaction stats only for files that have redactions */}
-                {activeFile.redactionStats.totalRedactions > 0 && (
-                  <div className="mt-4 pt-4 border-t">
-                    <h4 className="font-medium text-gray-800 dark:text-gray-200 mb-2">
-                      Redaction Summary:
-                    </h4>
-                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
-                      {Object.entries(activeFile.redactionStats.categories).map(([category, count]) => (
-                        <div key={category} className="text-center">
-                          <div className="text-lg font-bold text-red-600 dark:text-red-400">
-                            {count}
-                          </div>
-                          <div className="text-xs text-gray-600 dark:text-gray-400">
-                            {category}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mt-3 pt-3 border-t">
-                      <div className="flex justify-between items-center text-sm">
-                        <span className="text-gray-600 dark:text-gray-400">
-                          Total sensitive data points found:
-                        </span>
-                        <Badge variant="destructive">
-                          {activeFile.redactionStats.totalRedactions} items
-                        </Badge>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
+                <Button
+                  onClick={() => removeRedaction(area.id)}
+                  variant="ghost"
+                  size="sm"
+                  className="text-red-600 hover:text-red-700"
+                  disabled={isRendering}
+                >
+                  Remove
+                </Button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
+
+      {/* Status */}
+      <div className="text-center text-xs text-gray-500 dark:text-gray-400 space-x-4">
+        <span>File: {fileName}</span>
+        <span>•</span>
+        <span>Scale: {Math.round(scale * 100)}%</span>
+        <span>•</span>
+        <span>Mode: {redactionMode ? 'Redaction' : 'View'}</span>
+        {selectedTextItems.size > 0 && (
+          <>
+            <span>•</span>
+            <span>Selected: {selectedTextItems.size} text items</span>
+          </>
+        )}
+        {redactionAreas.length > 0 && (
+          <>
+            <span>•</span>
+            <span>Redactions: {redactionAreas.length}</span>
+          </>
+        )}
+        {isRendering && (
+          <>
+            <span>•</span>
+            <span>Status: Rendering...</span>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Enhanced DOCX Viewer Component using mammoth.js
+const DOCXViewer: React.FC<{ file: any, fileName: string, content?: string }> = ({ file, fileName, content }) => {
+  const [htmlContent, setHtmlContent] = useState<string>('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string>('')
+  const [processingMethod, setProcessingMethod] = useState<string>('')
+  const [originalFileData, setOriginalFileData] = useState<File | Blob | null>(null)
+
+  useEffect(() => {
+    const convertDocxToHtml = async () => {
+      setLoading(true)
+      setError('')
+      setHtmlContent('')
+      
+      try {
+        console.log('Processing DOCX file:', fileName)
+        
+        let arrayBuffer: ArrayBuffer
+        
+        // Determine the source of the DOCX data and store original file
+        if (file instanceof File) {
+          console.log('Converting File object to ArrayBuffer')
+          arrayBuffer = await file.arrayBuffer()
+          setOriginalFileData(file) // Store original File object
+          setProcessingMethod('File object with mammoth.js')
+        } else if (file instanceof Blob) {
+          console.log('Converting Blob object to ArrayBuffer')
+          arrayBuffer = await file.arrayBuffer()
+          setOriginalFileData(file) // Store original Blob object
+          setProcessingMethod('Blob object with mammoth.js')
+        } else if (content) {
+          console.log('Processing content string')
+          
+          // Try to parse content as JSON first (from backend processing)
+          try {
+            const parsedContent = JSON.parse(content)
+            console.log('Parsed content structure:', {
+              type: parsedContent.type,
+              hasHtmlContent: !!parsedContent.htmlContent,
+              hasContent: !!parsedContent.content,
+              hasTextContent: !!parsedContent.textContent
+            })
+            
+            // If we already have HTML content from backend processing, use it
+            if (parsedContent.htmlContent && parsedContent.type === 'html') {
+              console.log('Using pre-processed HTML content')
+              const styledHtml = `
+                <div class="docx-content">
+                  ${parsedContent.htmlContent}
+                </div>
+              `
+              setHtmlContent(styledHtml)
+              setProcessingMethod('Pre-processed HTML from backend')
+              setLoading(false)
+              return
+            }
+            
+            // If we have plain text content, format it as HTML with proper styling
+            if (parsedContent.textContent || parsedContent.content) {
+              const textContent = parsedContent.textContent || parsedContent.content
+              const formattedHtml = `
+                <div class="docx-content">
+                  <h2 class="docx-title">${fileName}</h2>
+                  <div class="docx-text-content">
+                    ${textContent.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}
+                  </div>
+                </div>
+              `
+              console.log('Using formatted text content as HTML')
+              setHtmlContent(formattedHtml)
+              setProcessingMethod('Formatted text content')
+              setLoading(false)
+              return
+            }
+          } catch (parseError) {
+            console.log('Content is not JSON, treating as raw text')
+            const formattedHtml = `
+              <div class="docx-content">
+                <h2 class="docx-title">${fileName}</h2>
+                <div class="docx-text-content">
+                  ${content.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}
+                </div>
+              </div>
+            `
+            setHtmlContent(formattedHtml)
+            setProcessingMethod('Raw text content')
+            setLoading(false)
+            return
+          }
+        }
+        
+        // If we have an ArrayBuffer, use mammoth.js to convert
+        if (arrayBuffer) {
+          console.log('Converting DOCX to HTML using mammoth.js, size:', arrayBuffer.byteLength, 'bytes')
+          
+          const { value: html, messages } = await mammoth.convertToHtml({ 
+            arrayBuffer,
+            options: {
+              // Convert styles to inline styles for better preview
+              styleMap: [
+                "p[style-name='Heading 1'] => h1.docx-heading:fresh",
+                "p[style-name='Heading 2'] => h2.docx-heading:fresh",
+                "p[style-name='Heading 3'] => h3.docx-heading:fresh",
+                "p[style-name='Title'] => h1.docx-title:fresh",
+                "p[style-name='Subtitle'] => h2.docx-subtitle:fresh",
+                "r[style-name='Strong'] => strong",
+                "r[style-name='Emphasis'] => em"
+              ],
+              // Include default styling
+              includeDefaultStyleMap: true,
+              // Convert embedded images
+              convertImage: mammoth.images.imgElement(function(image) {
+                return image.read("base64").then(function(imageBuffer) {
+                  return {
+                    src: "data:" + image.contentType + ";base64," + imageBuffer
+                  }
+                })
+              })
+            }
+          })
+          
+          if (messages.length > 0) {
+            console.log('Mammoth conversion messages:', messages)
+          }
+          
+          if (html && html.trim()) {
+            // Wrap in container with proper styling classes
+            const styledHtml = `<div class="docx-content">${html}</div>`
+            
+            console.log('Successfully converted DOCX to HTML:', {
+              htmlLength: html.length,
+              messagesCount: messages.length
+            })
+            
+            setHtmlContent(styledHtml)
+            setProcessingMethod('Mammoth.js conversion')
+          } else {
+            throw new Error('Mammoth conversion returned empty HTML')
+          }
+        } else {
+          throw new Error('No valid DOCX data source found')
+        }
+        
+      } catch (err) {
+        console.error('Error converting DOCX:', err)
+        const errorMessage = (err as Error).message
+        
+        setError(`Failed to convert DOCX document: ${fileName}
+
+Error Details: ${errorMessage}
+
+This might happen if:
+• Document is corrupted or password protected
+• Document uses unsupported DOCX features
+• File is not a valid DOCX format
+• Memory limitations during processing
+
+Troubleshooting:
+1. Verify the file opens correctly in Microsoft Word
+2. Try saving as a new .docx file
+3. Remove complex formatting or embedded objects
+4. Ensure the file is not password protected
+5. Check file size and complexity`)
+
+        setProcessingMethod('Mammoth.js conversion failed')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    convertDocxToHtml()
+
+    // Cleanup
+    return () => {
+      setHtmlContent('')
+      setError('')
+      setOriginalFileData(null)
+    }
+  }, [file, fileName, content])
+
+  // Download original DOCX file
+  const downloadOriginalDOCX = () => {
+    if (originalFileData) {
+      console.log('Downloading original DOCX file:', fileName)
+      const url = URL.createObjectURL(originalFileData)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } else {
+      console.warn('No original file data available for download')
+      alert('Original DOCX file is not available for download. Try downloading as HTML instead.')
+    }
+  }
+
+  // Download as HTML file
+  const downloadAsHTML = () => {
+    if (htmlContent) {
+      const fullHtmlDocument = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>${fileName}</title>
+  <style>
+    body { 
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+      margin: 40px auto; 
+      line-height: 1.6; 
+      color: #2c3e50;
+      max-width: 800px;
+      padding: 20px;
+      background-color: #ffffff;
+    }
+    .docx-content {
+      color: #2c3e50;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+    .docx-title, .docx-heading, h1, h2, h3, h4, h5, h6 {
+      color: #2c3e50 !important;
+      font-weight: 600;
+      margin-top: 1.5em;
+      margin-bottom: 0.8em;
+    }
+    .docx-title {
+      font-size: 24px;
+      border-bottom: 2px solid #3498db;
+      padding-bottom: 10px;
+    }
+    p {
+      margin-bottom: 1em;
+      color: #2c3e50;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 1em 0;
+    }
+    th, td {
+      border: 1px solid #bdc3c7;
+      padding: 12px;
+      text-align: left;
+      color: #2c3e50;
+    }
+    th {
+      background-color: #ecf0f1;
+      font-weight: 600;
+    }
+    img {
+      max-width: 100%;
+      height: auto;
+      margin: 10px 0;
+    }
+    ul, ol {
+      margin: 1em 0;
+      padding-left: 2em;
+      color: #2c3e50;
+    }
+    blockquote {
+      margin: 1em 0;
+      padding: 15px 20px;
+      border-left: 4px solid #3498db;
+      background-color: #f8f9fa;
+      font-style: italic;
+      color: #2c3e50;
+    }
+    strong {
+      color: #2c3e50;
+      font-weight: 600;
+    }
+    em {
+      color: #2c3e50;
+      font-style: italic;
+    }
+    @media print {
+      body {
+        margin: 0;
+        padding: 20px;
+      }
+    }
+  </style>
+</head>
+<body>
+  ${htmlContent}
+</body>
+</html>`
+
+      const blob = new Blob([fullHtmlDocument], { type: 'text/html' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName.replace(/\.(docx?)$/i, '.html')
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    }
+  }
+
+  // Download as plain text
+  const downloadAsText = () => {
+    if (htmlContent) {
+      // Convert HTML to plain text
+      const textContent = htmlContent
+        .replace(/<[^>]+>/g, ' ') // Remove HTML tags
+        .replace(/\s+/g, ' ') // Normalize whitespace
+        .replace(/&nbsp;/g, ' ') // Replace non-breaking spaces
+        .replace(/&amp;/g, '&') // Decode HTML entities
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .trim()
+      
+      const blob = new Blob([textContent], { type: 'text/plain' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName.replace(/\.(docx?)$/i, '.txt')
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-96 bg-gray-50 dark:bg-gray-900 rounded-lg">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600 dark:text-gray-400">Converting DOCX to HTML...</p>
+          <p className="text-xs text-gray-500 dark:text-gray-500 mt-2">Using mammoth.js converter</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center h-96 bg-gray-50 dark:bg-gray-900 rounded-lg">
+        <div className="text-center max-w-md">
+          <div className="text-red-500 text-4xl mb-4">⚠️</div>
+          <p className="text-red-600 dark:text-red-400 mb-4 text-sm whitespace-pre-line">
+            {error}
+          </p>
+          <div className="space-y-2">
+            {originalFileData && (
+              <Button 
+                onClick={downloadOriginalDOCX}
+                variant="default"
+                className="w-full"
+              >
+                <Download className="w-4 h-4 mr-2" />
+                Download Original DOCX
+              </Button>
+            )}
+            <Button 
+              onClick={downloadAsHTML}
+              variant="outline"
+              className="w-full"
+              disabled={!htmlContent}
+            >
+              <Download className="w-4 h-4 mr-2" />
+              Download as HTML
+            </Button>
+            <Button 
+              onClick={() => {
+                setError('')
+                setLoading(true)
+                window.location.reload()
+              }}
+              variant="ghost"
+              size="sm"
+              className="w-full"
+            >
+              Try Again
+            </Button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (!htmlContent) {
+    return (
+      <div className="flex items-center justify-center h-96 bg-gray-50 dark:bg-gray-900 rounded-lg">
+        <div className="text-center">
+          <div className="text-yellow-500 text-4xl mb-4">📄</div>
+          <p className="text-gray-600 dark:text-gray-400">No DOCX content available</p>
+          <p className="text-sm text-gray-500 dark:text-gray-500 mt-2">
+            The document was processed but no readable content was found
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* DOCX Controls */}
+      <div className="flex flex-wrap items-center justify-between gap-4 p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+        <div className="flex items-center space-x-2">
+          <span className="text-sm font-medium">
+            📄 DOCX Document Preview
+          </span>
+          <Badge variant="secondary" className="text-xs">
+            HTML Converted
+          </Badge>
+          <Badge variant="outline" className="text-xs">
+            {processingMethod}
+          </Badge>
+          {htmlContent && (
+            <Badge variant="outline" className="text-xs">
+              {Math.round(htmlContent.length / 1024)}KB
+            </Badge>
+          )}
+        </div>
+
+        {/* Download Options Dropdown */}
+        <div className="flex items-center space-x-2">
+          {/* Primary Download Button - Original DOCX */}
+          {originalFileData && (
+            <Button
+              onClick={downloadOriginalDOCX}
+              variant="default"
+              size="sm"
+            >
+              <Download className="w-4 h-4 mr-2" />
+              Download DOCX
+            </Button>
+          )}
+          
+          {/* Secondary Download Options */}
+          <div className="relative group">
+            <Button
+              variant="outline"
+              size="sm"
+              className="flex items-center space-x-1"
+            >
+              <Download className="w-4 h-4" />
+              <span>More Formats</span>
+              <ChevronDown className="w-3 h-3" />
+            </Button>
+            
+            {/* Dropdown Menu */}
+            <div className="absolute right-0 top-full mt-1 w-48 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-10">
+              <div className="py-1">
+                {originalFileData && (
+                  <button
+                    onClick={downloadOriginalDOCX}
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
+                  >
+                    <span>📄</span>
+                    <span>Original DOCX</span>
+                  </button>
+                )}
+                <button
+                  onClick={downloadAsHTML}
+                  className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
+                  disabled={!htmlContent}
+                >
+                  <span>🌐</span>
+                  <span>HTML Format</span>
+                </button>
+                <button
+                  onClick={downloadAsText}
+                  className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
+                  disabled={!htmlContent}
+                >
+                  <span>📝</span>
+                  <span>Plain Text</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* DOCX Content with enhanced styling */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border shadow-sm">
+        <style jsx>{`
+          .docx-preview-container {
+            background-color: white;
+            color: #2c3e50;
+          }
+          .dark .docx-preview-container {
+            background-color: #1f2937;
+            color: #f9fafb;
+          }
+          .docx-content {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.7;
+            color: #2c3e50;
+            font-size: 14px;
+          }
+          .dark .docx-content {
+            color: #f9fafb;
+          }
+          .docx-content h1,
+          .docx-content h2, 
+          .docx-content h3,
+          .docx-content h4,
+          .docx-content h5,
+          .docx-content h6,
+          .docx-title,
+          .docx-heading {
+            color: #1e40af !important;
+            font-weight: 600;
+            margin-top: 1.5em;
+            margin-bottom: 0.8em;
+          }
+          .dark .docx-content h1,
+          .dark .docx-content h2,
+          .dark .docx-content h3,
+          .dark .docx-content h4,
+          .dark .docx-content h5,
+          .dark .docx-content h6,
+          .dark .docx-title,
+          .dark .docx-heading {
+            color: #60a5fa !important;
+          }
+          .docx-title {
+            font-size: 20px;
+            border-bottom: 2px solid #3b82f6;
+            padding-bottom: 8px;
+            margin-bottom: 1.5em;
+          }
+          .docx-content p {
+            margin-bottom: 1em;
+            color: #374151;
+            text-align: justify;
+          }
+          .dark .docx-content p {
+            color: #d1d5db;
+          }
+          .docx-content strong {
+            color: #1f2937;
+            font-weight: 600;
+          }
+          .dark .docx-content strong {
+            color: #f9fafb;
+          }
+          .docx-content em {
+            color: #4b5563;
+            font-style: italic;
+          }
+          .dark .docx-content em {
+            color: #d1d5db;
+          }
+          .docx-content table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1.5em 0;
+            border: 1px solid #d1d5db;
+          }
+          .dark .docx-content table {
+            border-color: #4b5563;
+          }
+          .docx-content th,
+          .docx-content td {
+            border: 1px solid #d1d5db;
+            padding: 12px;
+            text-align: left;
+            color: #374151;
+          }
+          .dark .docx-content th,
+          .dark .docx-content td {
+            border-color: #4b5563;
+            color: #d1d5db;
+          }
+          .docx-content th {
+            background-color: #f3f4f6;
+            font-weight: 600;
+            color: #1f2937;
+          }
+          .dark .docx-content th {
+            background-color: #374151;
+            color: #f9fafb;
+          }
+          .docx-content ul,
+          .docx-content ol {
+            margin: 1em 0;
+            padding-left: 2em;
+            color: #374151;
+          }
+          .dark .docx-content ul,
+          .dark .docx-content ol {
+            color: #d1d5db;
+          }
+          .docx-content li {
+            margin-bottom: 0.5em;
+            color: #374151;
+          }
+          .dark .docx-content li {
+            color: #d1d5db;
+          }
+          .docx-content blockquote {
+            margin: 1.5em 0;
+            padding: 15px 20px;
+            border-left: 4px solid #3b82f6;
+            background-color: #f8fafc;
+            font-style: italic;
+            color: #475569;
+          }
+          .dark .docx-content blockquote {
+            background-color: #1e293b;
+            color: #cbd5e1;
+            border-left-color: #60a5fa;
+          }
+          .docx-content img {
+            max-width: 100%;
+            height: auto;
+            margin: 15px 0;
+            border-radius: 6px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+          }
+          .docx-text-content {
+            color: #374151;
+            line-height: 1.7;
+          }
+          .dark .docx-text-content {
+            color: #d1d5db;
+          }
+        `}</style>
+        
+        <div 
+          className="docx-preview-container p-6 max-h-[600px] overflow-auto"
+          dangerouslySetInnerHTML={{ __html: htmlContent }}
+        />
+      </div>
+
+      {/* Content Statistics */}
+      <div className="text-center text-xs text-gray-500 dark:text-gray-400 space-x-4">
+        <span>Processing Method: {processingMethod}</span>
+        <span>•</span>
+        <span>Content Length: {htmlContent.length} characters</span>
+        <span>•</span>
+        <span>Original File: {originalFileData ? 'Available' : 'Not Available'}</span>
+      </div>
+    </div>
+  )
+}
+
+// Enhanced DOCX Redaction Editor Component
+const DOCXRedactionEditor: React.FC<{ file: any, fileName: string, content?: string }> = ({ file, fileName, content }) => {
+  const editorRef = useRef<HTMLDivElement>(null)
+  const [htmlContent, setHtmlContent] = useState<string>('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string>('')
+  const [redactionMode, setRedactionMode] = useState(false)
+  const [redactionType, setRedactionType] = useState("NAME")
+  const [redactionHistory, setRedactionHistory] = useState<string[]>([])
+  const [currentHistoryIndex, setCurrentHistoryIndex] = useState(-1)
+  const [redactionCount, setRedactionCount] = useState(0)
+
+  const redactionLabels = [
+    "NAME",
+    "EMAIL", 
+    "PHONE",
+    "ADDRESS",
+    "SSN",
+    "CREDIT_CARD",
+    "LOCATION",
+    "IP",
+    "CUSTOM"
+  ]
+
+  const redactionColors = {
+    NAME: '#ef4444',
+    EMAIL: '#f59e0b', 
+    PHONE: '#10b981',
+    ADDRESS: '#3b82f6',
+    SSN: '#8b5cf6',
+    CREDIT_CARD: '#f97316',
+    LOCATION: '#06b6d4',
+    IP: '#84cc16',
+    CUSTOM: '#6b7280'
+  }
+
+  useEffect(() => {
+    const convertDocxToHtml = async () => {
+      setLoading(true)
+      setError('')
+      
+      try {
+        let htmlResult = ''
+        
+        if (file instanceof File || file instanceof Blob) {
+          console.log('Converting DOCX file to HTML for redaction')
+          const arrayBuffer = await file.arrayBuffer()
+          const { value: html } = await mammoth.convertToHtml({ 
+            arrayBuffer,
+            options: {
+              styleMap: [
+                "p[style-name='Heading 1'] => h1.docx-heading:fresh",
+                "p[style-name='Heading 2'] => h2.docx-heading:fresh", 
+                "p[style-name='Heading 3'] => h3.docx-heading:fresh",
+                "p[style-name='Title'] => h1.docx-title:fresh",
+                "r[style-name='Strong'] => strong",
+                "r[style-name='Emphasis'] => em"
+              ],
+              includeDefaultStyleMap: true
+            }
+          })
+          htmlResult = html
+        } else if (content) {
+          try {
+            const parsedContent = JSON.parse(content)
+            if (parsedContent.htmlContent) {
+              htmlResult = parsedContent.htmlContent
+            } else if (parsedContent.textContent || parsedContent.content) {
+              const textContent = parsedContent.textContent || parsedContent.content
+              htmlResult = `<div class="docx-content">${textContent.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</div>`
+            }
+          } catch {
+            htmlResult = `<div class="docx-content">${content.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</div>`
+          }
+        }
+        
+        if (htmlResult) {
+          setHtmlContent(htmlResult)
+          // Initialize history with original content
+          setRedactionHistory([htmlResult])
+          setCurrentHistoryIndex(0)
+        } else {
+          throw new Error('No content available for redaction')
+        }
+        
+      } catch (err) {
+        console.error('Error preparing DOCX for redaction:', err)
+        setError(`Failed to prepare document for redaction: ${(err as Error).message}`)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    convertDocxToHtml()
+  }, [file, fileName, content])
+
+  const saveToHistory = (newContent: string) => {
+    const newHistory = redactionHistory.slice(0, currentHistoryIndex + 1)
+    newHistory.push(newContent)
+    setRedactionHistory(newHistory)
+    setCurrentHistoryIndex(newHistory.length - 1)
+  }
+
+  const redactSelection = () => {
+    if (!editorRef.current) return
+    
+    const selection = window.getSelection()
+    if (!selection || selection.isCollapsed) {
+      alert('Please select some text to redact')
+      return
+    }
+
+    const range = selection.getRangeAt(0)
+    const selectedText = selection.toString()
+    
+    if (selectedText.trim().length === 0) {
+      alert('Please select valid text to redact')
+      return
+    }
+
+    // Create redaction span with color coding
+    const redactionSpan = document.createElement('span')
+    redactionSpan.className = 'redacted-text'
+    redactionSpan.style.backgroundColor = redactionColors[redactionType as keyof typeof redactionColors]
+    redactionSpan.style.color = 'white'
+    redactionSpan.style.padding = '2px 6px'
+    redactionSpan.style.borderRadius = '3px'
+    redactionSpan.style.fontWeight = 'bold'
+    redactionSpan.style.fontSize = '0.9em'
+    redactionSpan.setAttribute('data-redaction-type', redactionType)
+    redactionSpan.setAttribute('data-original-text', selectedText)
+    redactionSpan.textContent = `[REDACTED_${redactionType}]`
+
+    // Replace selected text with redaction
+    range.deleteContents()
+    range.insertNode(redactionSpan)
+    
+    // Clear selection
+    selection.removeAllRanges()
+    
+    // Save to history
+    const newContent = editorRef.current.innerHTML
+    saveToHistory(newContent)
+    setHtmlContent(newContent)
+    setRedactionCount(prev => prev + 1)
+    
+    console.log('Redacted text:', selectedText, 'as', redactionType)
+  }
+
+  const undoRedaction = () => {
+    if (currentHistoryIndex > 0) {
+      const prevIndex = currentHistoryIndex - 1
+      const prevContent = redactionHistory[prevIndex]
+      setCurrentHistoryIndex(prevIndex)
+      setHtmlContent(prevContent)
+      if (editorRef.current) {
+        editorRef.current.innerHTML = prevContent
+      }
+      setRedactionCount(prev => Math.max(0, prev - 1))
+    }
+  }
+
+  const redoRedaction = () => {
+    if (currentHistoryIndex < redactionHistory.length - 1) {
+      const nextIndex = currentHistoryIndex + 1
+      const nextContent = redactionHistory[nextIndex]
+      setCurrentHistoryIndex(nextIndex)
+      setHtmlContent(nextContent)
+      if (editorRef.current) {
+        editorRef.current.innerHTML = nextContent
+      }
+      setRedactionCount(prev => prev + 1)
+    }
+  }
+
+  const clearAllRedactions = () => {
+    if (redactionHistory.length > 0) {
+      const originalContent = redactionHistory[0]
+      setHtmlContent(originalContent)
+      if (editorRef.current) {
+        editorRef.current.innerHTML = originalContent
+      }
+      setCurrentHistoryIndex(0)
+      setRedactionCount(0)
+    }
+  }
+
+  const downloadRedactedDocx = async () => {
+    if (!editorRef.current) return;
+
+    // Get the redacted HTML content
+    const redactedHtml = editorRef.current.innerHTML;
+
+    // Create a Word-compatible HTML document
+    const wordHtml = `
+      <html xmlns:o='urn:schemas-microsoft-com:office:office'
+            xmlns:w='urn:schemas-microsoft-com:office:word'>
+      <head>
+        <meta charset="utf-8">
+        <title>${fileName} - Redacted</title>
+        <style>
+          body { font-family: 'Calibri', sans-serif; font-size: 11pt; }
+          .redacted-text { background: #000; color: #fff; font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        ${redactedHtml}
+      </body>
+      </html>
+    `;
+
+    const blob = new Blob([wordHtml], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName.replace(/\.(docx?)$/i, '_redacted.doc');
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  const downloadRedactionReport = () => {
+    const redactedElements = editorRef.current?.querySelectorAll('.redacted-text')
+    const report = {
+      fileName: fileName,
+      timestamp: new Date().toISOString(),
+      totalRedactions: redactedElements?.length || 0,
+      redactionsByType: {},
+      redactionDetails: []
+    }
+
+    redactedElements?.forEach((element, index) => {
+      const type = element.getAttribute('data-redaction-type') || 'UNKNOWN'
+      const originalText = element.getAttribute('data-original-text') || ''
+      
+      // Count by type
+      report.redactionsByType[type] = (report.redactionsByType[type] || 0) + 1
+      
+      // Add details
+      report.redactionDetails.push({
+        index: index + 1,
+        type: type,
+        originalText: originalText,
+        redactedAs: element.textContent
+      })
+    })
+
+    const reportJson = JSON.stringify(report, null, 2)
+    const blob = new Blob([reportJson], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fileName.replace(/\.(docx?)$/i, '_redaction_report.json')
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-96 bg-gray-50 dark:bg-gray-900 rounded-lg">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600 dark:text-gray-400">Preparing DOCX for redaction...</p>
+          <p className="text-xs text-gray-500 dark:text-gray-500 mt-2">Loading interactive editor</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center h-96 bg-gray-50 dark:bg-gray-900 rounded-lg">
+        <div className="text-center max-w-md">
+          <div className="text-red-500 text-4xl mb-4">⚠️</div>
+          <p className="text-red-600 dark:text-red-400 mb-4 text-sm whitespace-pre-line">
+            {error}
+          </p>
+          <Button onClick={() => window.location.reload()} variant="outline" size="sm">
+            Try Again
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Redaction Controls */}
+      <div className="flex flex-wrap items-center justify-between gap-4 p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+        <div className="flex items-center space-x-2">
+          <span className="text-sm font-medium">DOCX Redaction Editor</span>
+          <Badge variant={redactionMode ? "destructive" : "secondary"} className="text-xs">
+            {redactionMode ? "Redaction Mode" : "Edit Mode"}
+          </Badge>
+          {redactionCount > 0 && (
+            <Badge variant="outline" className="text-xs">
+              {redactionCount} redactions
+            </Badge>
+          )}
+        </div>
+
+        <div className="flex items-center space-x-2">
+          <Button
+            onClick={() => setRedactionMode(!redactionMode)}
+            variant={redactionMode ? "destructive" : "default"}
+            size="sm"
+          >
+            <Edit3 className="w-4 h-4 mr-2" />
+            {redactionMode ? "Exit Redaction" : "Start Redacting"}
+          </Button>
+        </div>
+      </div>
+
+      {/* Redaction Toolbar */}
+      {redactionMode && (
+        <div className="flex flex-wrap items-center gap-4 p-4 bg-white dark:bg-gray-800 rounded-lg border">
+          <div className="flex items-center space-x-2">
+            <label htmlFor="redaction-type" className="text-sm font-medium">
+              Redaction Type:
+            </label>
+            <select
+              id="redaction-type"
+              value={redactionType}
+              onChange={(e) => setRedactionType(e.target.value)}
+              className="border border-gray-300 dark:border-gray-600 px-3 py-1 rounded text-sm bg-white dark:bg-gray-700"
+            >
+              {redactionLabels.map((label) => (
+                <option key={label} value={label}>
+                  {label.replace('_', ' ')}
+                </option>
+              ))}
+            </select>
+            <div 
+              className="w-4 h-4 rounded"
+              style={{ backgroundColor: redactionColors[redactionType as keyof typeof redactionColors] }}
+              title={`Color for ${redactionType}`}
+            />
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <Button onClick={redactSelection} variant="destructive" size="sm">
+              <span className="mr-2">⬛</span>
+              Redact Selected
+            </Button>
+            
+            <Button 
+              onClick={undoRedaction} 
+              variant="outline" 
+              size="sm"
+              disabled={currentHistoryIndex <= 0}
+            >
+              <Undo className="w-4 h-4 mr-2" />
+              Undo
+            </Button>
+            
+            <Button 
+              onClick={redoRedaction} 
+              variant="outline" 
+              size="sm"
+              disabled={currentHistoryIndex >= redactionHistory.length - 1}
+            >
+              <span className="mr-2">↺</span>
+              Redo
+            </Button>
+            
+            {redactionCount > 0 && (
+              <Button onClick={clearAllRedactions} variant="outline" size="sm">
+                <span className="mr-2">🗑️</span>
+                Clear All
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Instructions */}
+      {redactionMode && (
+        <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+          <div className="text-yellow-600 dark:text-yellow-400 text-sm">
+            💡 <strong>How to Redact:</strong> Select any text in the document below, choose a redaction type, then click "Redact Selected". 
+            The selected text will be replaced with a colored redaction label.
+          </div>
+        </div>
+      )}
+
+      {/* Editable Document */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border shadow-sm">
+        <div 
+          ref={editorRef}
+          contentEditable={true}
+          dangerouslySetInnerHTML={{ __html: htmlContent }}
+          className="p-6 min-h-[400px] max-h-[600px] overflow-auto focus:outline-none"
+          style={{
+            fontFamily: 'Calibri, Arial, sans-serif',
+            fontSize: '14px',
+            lineHeight: '1.6',
+            color: '#2c3e50',
+            userSelect: redactionMode ? 'text' : 'text',
+            cursor: redactionMode ? 'text' : 'text'
+          }}
+          onInput={(e) => {
+            const newContent = e.currentTarget.innerHTML
+            setHtmlContent(newContent)
+          }}
+        />
+      </div>
+
+        
+
+      {/* Download Options */}
+      {redactionCount > 0 && (
+        <div className="flex flex-wrap items-center gap-4 p-4 bg-white dark:bg-gray-800 rounded-lg border">
+          <div className="flex items-center space-x-2">
+            <Button onClick={downloadRedactedDocx} variant="default" size="sm">
+              <Download className="w-4 h-4 mr-2" />
+              Download Redacted DOCX
+            </Button>
+            
+            <Button onClick={downloadRedactionReport} variant="outline" size="sm">
+              <Save className="w-4 h-4 mr-2" />
+              Download Report
+            </Button>
+          </div>
+          
+          <div className="text-sm text-gray-600 dark:text-gray-400">
+            Total Redactions: {redactionCount}
+          </div>
+        </div>
+      )}
+
+      {/* Redaction Legend */}
+      {redactionCount > 0 && (
+        <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-4">
+          <h4 className="text-sm font-medium mb-3">Redaction Types Used:</h4>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(redactionColors).map(([type, color]) => {
+              const count = editorRef.current?.querySelectorAll(`[data-redaction-type="${type}"]`).length || 0
+              if (count === 0) return null
+              
+              return (
+                <div key={type} className="flex items-center space-x-2 text-xs">
+                  <div 
+                    className="w-3 h-3 rounded"
+                    style={{ backgroundColor: color }}
+                  />
+                  <span>{type.replace('_', ' ')}: {count}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Status */}
+      <div className="text-center text-xs text-gray-500 dark:text-gray-400 space-x-4">
+        <span>File: {fileName}</span>
+        <span>•</span>
+        <span>Mode: {redactionMode ? 'Redaction' : 'Edit'}</span>
+        <span>•</span>
+        <span>History: {currentHistoryIndex + 1}/{redactionHistory.length}</span>
+        {redactionCount > 0 && (
+          <>
+            <span>•</span>
+            <span>Redactions: {redactionCount}</span>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export function PreviewCompo({ className, uploadedFiles }: PreviewCompoProps) {
+  const [activeFileIndex, setActiveFileIndex] = useState(0)
+
+  const formatFileSize = (bytes: number): string => {
+    if (bytes === 0) return '0 Bytes'
+    const k = 1024
+    const sizes = ['Bytes', 'KB', 'MB', 'GB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+  }
+
+  const getFileIcon = (type: string) => {
+    switch (type.toLowerCase()) {
+      case 'pdf':
+        return '📄'
+      case 'doc':
+      case 'docx':
+        return '📝'
+      case 'txt':
+        return '📄'
+      case 'json':
+        return '📋'
+      default:
+        return '📄'
+    }
+  }
+
+  const isPdfFile = (fileName: string) => {
+    return fileName.toLowerCase().endsWith('.pdf')
+  }
+
+  const isDocxFile = (fileName: string) => {
+    return fileName.toLowerCase().endsWith('.docx') || fileName.toLowerCase().endsWith('.doc')
+  }
+
+  const getPdfData = (file: any) => {
+    console.log('Getting PDF data for file:', file.name)
+    console.log('File object type:', typeof file.file)
+    console.log('File object instanceof File:', file.file instanceof File)
+    console.log('File object instanceof Blob:', file.file instanceof Blob)
+    console.log('Has temp URL:', !!(file as any).tempUrl)
+    
+    // Priority 1: Use File object if available
+    if (file.file instanceof File) {
+      console.log('Using File object for PDF:', file.file.name, file.file.size, file.file.type)
+      return file.file
+    } 
+    
+    // Priority 2: Use Blob object if available
+    if (file.file instanceof Blob) {
+      console.log('Using Blob object for PDF:', file.file.size, file.file.type)
+      return file.file
+    }
+    
+    // Priority 3: Use temporary URL if available
+    if ((file as any).tempUrl) {
+      console.log('Using temporary URL for PDF:', (file as any).tempUrl)
+      return (file as any).tempUrl
+    }
+    
+    // Priority 4: Check if the file object has arrayBuffer method
+    if (file.file && typeof file.file.arrayBuffer === 'function') {
+      console.log('Using File-like object for PDF')
+      return file.file
+    }
+    
+    // Priority 5: Try to handle base64 content
+    if (file.content && typeof file.content === 'string') {
+      if (file.content.startsWith('data:application/pdf;base64,')) {
+        console.log('Using base64 data URL for PDF')
+        return file.content
+      }
+      
+      if (file.content.match(/^[A-Za-z0-9+/]*={0,2}$/) && file.content.length > 100) {
+        console.log('Converting base64 string to data URL')
+        return `data:application/pdf;base64,${file.content}`
+      }
+    }
+    
+    console.warn('Could not determine PDF data format for:', file.name)
+    return null
+  }
+
+  // Generic download function for any file type
+  const downloadFile = (file: any) => {
+    console.log('Downloading file:', file.name)
+    
+    try {
+      // If there's a File object, use it directly
+      if (file.file instanceof File) {
+        const url = URL.createObjectURL(file.file)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = file.name
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+        console.log('Downloaded File object:', file.name)
+        return
+      }
+      
+      // If there's a Blob object, use it
+      if (file.file instanceof Blob) {
+        const url = URL.createObjectURL(file.file)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = file.name
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+        console.log('Downloaded Blob object:', file.name)
+        return
+      }
+      
+      // For non-PDF/DOCX files, show text content
+      if (!isPdfFile(file.name) && !isDocxFile(file.name) && file.content && typeof file.content === 'string') {
+        let mimeType = 'text/plain'
+        
+        // Determine MIME type based on file extension
+        if (file.name.toLowerCase().endsWith('.json')) {
+          mimeType = 'application/json'
+        } else if (file.name.toLowerCase().endsWith('.csv')) {
+          mimeType = 'text/csv'
+        } else if (file.name.toLowerCase().endsWith('.xml')) {
+          mimeType = 'application/xml'
+        }
+        
+        const blob = new Blob([file.content], { type: mimeType })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = file.name
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+        console.log('Downloaded text content as blob:', file.name)
+        return
+      }
+      
+      // Fallback: create a text file with available information
+      const fallbackContent = `File: ${file.name}
+Size: ${formatFileSize(file.size)}
+Type: ${file.type.toUpperCase()}
+Last Modified: ${file.lastModified ? new Date(file.lastModified).toLocaleString() : 'Unknown'}
+
+Note: Original file content was not available for download.
+`
+      
+      const blob = new Blob([fallbackContent], { type: 'text/plain' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${file.name.replace(/\.[^/.]+$/, '')}_info.txt`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      console.log('Downloaded fallback text file:', file.name)
+      
+    } catch (error) {
+      console.error('Error downloading file:', error)
+      alert(`Error downloading file: ${(error as Error).message}`)
+    }
+  }
+
+  // Download all files as a ZIP
+  const downloadAllFiles = async () => {
+    try {
+      // Import JSZip dynamically
+      const JSZip = (await import('jszip')).default
+      const zip = new JSZip()
+      
+      console.log('Creating ZIP with', uploadedFiles.length, 'files')
+      
+      for (const file of uploadedFiles) {
+        try {
+          if (file.file instanceof File || file.file instanceof Blob) {
+            // Add File or Blob directly
+            zip.file(file.name, file.file)
+            console.log('Added to ZIP (File/Blob):', file.name)
+          } else if (file.content && typeof file.content === 'string') {
+            // Handle base64 PDF content
+            if (file.name.toLowerCase().endsWith('.pdf') && file.content.match(/^[A-Za-z0-9+/]*={0,2}$/)) {
+              try {
+                const binaryString = atob(file.content.replace(/^data:.*;base64,/, ''))
+                const bytes = new Uint8Array(binaryString.length)
+                for (let i = 0; i < binaryString.length; i++) {
+                  bytes[i] = binaryString.charCodeAt(i)
+                }
+                zip.file(file.name, bytes)
+                console.log('Added to ZIP (base64 PDF):', file.name)
+              } catch (base64Error) {
+                console.error('Error decoding base64 for', file.name, base64Error)
+                zip.file(file.name, file.content)
+              }
+            } else {
+              // Add text content for non-PDF/DOCX files only
+              if (!isPdfFile(file.name) && !isDocxFile(file.name)) {
+                zip.file(file.name, file.content)
+                console.log('Added to ZIP (text):', file.name)
+              }
+            }
+          } else {
+            // Fallback: create info file
+            const fallbackContent = `File: ${file.name}
+Size: ${formatFileSize(file.size)}
+Type: ${file.type.toUpperCase()}
+Last Modified: ${file.lastModified ? new Date(file.lastModified).toLocaleString() : 'Unknown'}
+
+Note: Original file content was not available for download.
+`
+            zip.file(`${file.name.replace(/\.[^/.]+$/, '')}_info.txt`, fallbackContent)
+            console.log('Added to ZIP (fallback):', file.name)
+          }
+        } catch (fileError) {
+          console.error('Error adding file to ZIP:', file.name, fileError)
+        }
+      }
+      
+      // Generate ZIP and download
+      const zipBlob = await zip.generateAsync({ type: 'blob' })
+      const url = URL.createObjectURL(zipBlob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `redacted_documents_${new Date().toISOString().split('T')[0]}.zip`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      
+      console.log('ZIP download completed')
+    } catch (error) {
+      console.error('Error creating ZIP:', error)
+      alert(`Error creating ZIP file: ${(error as Error).message}`)
+    }
+  }
+
+  if (!uploadedFiles || uploadedFiles.length === 0) {
+    return (
+      <div className={`${className} p-8 text-center`}>
+        <div className="text-6xl mb-4">📄</div>
+        <h3 className="text-xl font-semibold text-gray-600 dark:text-gray-300 mb-2">
+          No documents to preview
+        </h3>
+        <p className="text-gray-500 dark:text-gray-400">
+          Upload and process documents to see them here
+        </p>
+      </div>
+    )
+  }
+
+  const activeFile = uploadedFiles[activeFileIndex]
+  const isActivePdf = isPdfFile(activeFile.name)
+  const isActiveDocx = isDocxFile(activeFile.name)
+
+  return (
+    <div className={`${className} space-y-6`}>
+      {/* File Tabs and Download All Button */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        {/* File Tabs */}
+        {uploadedFiles.length > 1 && (
+          <div className="flex flex-wrap gap-2">
+            {uploadedFiles.map((file, index) => (
+              <button
+                key={index}
+                onClick={() => setActiveFileIndex(index)}
+                className={`flex items-center space-x-2 px-4 py-2 rounded-lg border transition-colors ${
+                  index === activeFileIndex
+                    ? 'bg-blue-100 dark:bg-blue-900 border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300'
+                    : 'bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
+                }`}
+              >
+                <span className="text-lg">{getFileIcon(file.type)}</span>
+                <span className="text-sm font-medium truncate max-w-[150px]">
+                  {file.name}
+                </span>
+                <Badge variant="secondary" className="text-xs">
+                  {formatFileSize(file.size)}
+                </Badge>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Download All Button */}
+        <div className="flex items-center space-x-2">
+          {uploadedFiles.length > 1 && (
+            <Button
+              onClick={downloadAllFiles}
+              variant="outline"
+              size="sm"
+              className="flex items-center space-x-2"
+            >
+              <Download className="w-4 h-4" />
+              <span>Download All ({uploadedFiles.length})</span>
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* File Preview */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <span className="text-2xl">{getFileIcon(activeFile.type)}</span>
+              <div>
+                <div className="font-semibold">{activeFile.name}</div>
+                <div className="text-sm text-gray-600 dark:text-gray-400 font-normal">
+                  {activeFile.type.toUpperCase()} • {formatFileSize(activeFile.size)}
+                  {activeFile.lastModified && (
+                    <> • {new Date(activeFile.lastModified).toLocaleDateString()}</>
+                  )}
+                </div>
+              </div>
+            </div>
+            {/* Individual File Download Button */}
+            <Button
+              onClick={() => downloadFile(activeFile)}
+              variant="outline"
+              size="sm"
+              className="flex items-center space-x-2"
+            >
+              <Download className="w-4 h-4" />
+              <span>Download</span>
+            </Button>
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {isActiveDocx ? (
+            <DOCXRedactionEditor
+              file={activeFile.file}
+              fileName={activeFile.name}
+              content={activeFile.content}
+            />
+          ) : isActivePdf ? (
+            <PDFViewer
+              file={getPdfData(activeFile)}
+              fileName={activeFile.name}
+            />
+          ) : (
+            <div className="space-y-4">
+              <div className="max-h-96 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded-lg p-4">
+                <pre className="whitespace-pre-wrap text-sm text-gray-800 dark:text-gray-200 font-mono leading-relaxed">
+                  {activeFile.content || 'No content available for preview'}
+                </pre>
+              </div>
+            </div>
+          )}
+        </CardContent>       </CardContent>
+
+
+
+
+}  )    </div>      </Card>      </Card>
     </div>
   )
 }
