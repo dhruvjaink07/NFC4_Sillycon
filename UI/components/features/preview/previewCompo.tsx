@@ -1992,12 +1992,11 @@ const DOCXRedactionEditor: React.FC<{ file: any, fileName: string, content?: str
           ref={editorRef}
           contentEditable={true}
           dangerouslySetInnerHTML={{ __html: htmlContent }}
-          className="p-6 min-h-[400px] max-h-[600px] overflow-auto focus:outline-none"
+          className="p-6 min-h-[400px] max-h-[600px] overflow-auto focus:outline-none text-gray-900 dark:text-gray-100"
           style={{
             fontFamily: 'Calibri, Arial, sans-serif',
             fontSize: '14px',
             lineHeight: '1.6',
-            color: '#2c3e50',
             userSelect: redactionMode ? 'text' : 'text',
             cursor: redactionMode ? 'text' : 'text'
           }}
@@ -2070,6 +2069,11 @@ const DOCXRedactionEditor: React.FC<{ file: any, fileName: string, content?: str
       </div>
     </div>
   )
+}
+
+interface PreviewCompoProps {
+  className?: string
+  uploadedFiles: any[]
 }
 
 export function PreviewCompo({ className, uploadedFiles }: PreviewCompoProps) {
@@ -2335,7 +2339,7 @@ Note: Original file content was not available for download.
       {/* File Tabs and Download All Button */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         {/* File Tabs */}
-        {uploadedFiles.length > 1 && (
+        {uploadedFiles.length > 1 &&(
           <div className="flex flex-wrap gap-2">
             {uploadedFiles.map((file, index) => (
               <button
@@ -2356,6 +2360,7 @@ Note: Original file content was not available for download.
                 </Badge>
               </button>
             ))}
+          
           </div>
         )}
 
@@ -2363,10 +2368,10 @@ Note: Original file content was not available for download.
         <div className="flex items-center space-x-2">
           {uploadedFiles.length > 1 && (
             <Button
-              onClick={downloadAllFiles}
-              variant="outline"
-              size="sm"
-              className="flex items-center space-x-2"
+            onClick={downloadAllFiles}
+            variant="outline"
+            size="sm"
+            className="flex items-center space-x-2"
             >
               <Download className="w-4 h-4" />
               <span>Download All ({uploadedFiles.length})</span>
@@ -2397,7 +2402,7 @@ Note: Original file content was not available for download.
               variant="outline"
               size="sm"
               className="flex items-center space-x-2"
-            >
+              >
               <Download className="w-4 h-4" />
               <span>Download</span>
             </Button>
@@ -2406,14 +2411,14 @@ Note: Original file content was not available for download.
         <CardContent>
           {isActiveDocx ? (
             <DOCXRedactionEditor
-              file={activeFile.file}
-              fileName={activeFile.name}
-              content={activeFile.content}
+            file={activeFile.file}
+            fileName={activeFile.name}
+            content={activeFile.content}
             />
           ) : isActivePdf ? (
             <PDFViewer
-              file={getPdfData(activeFile)}
-              fileName={activeFile.name}
+            file={getPdfData(activeFile)}
+            fileName={activeFile.name}
             />
           ) : (
             <div className="space-y-4">
@@ -2424,12 +2429,14 @@ Note: Original file content was not available for download.
               </div>
             </div>
           )}
-        </CardContent>       </CardContent>
+        </CardContent>
+      </Card>
+
+          
 
 
-
-
-}  )    </div>      </Card>      </Card>
+        )
+      )}
     </div>
   )
 }
